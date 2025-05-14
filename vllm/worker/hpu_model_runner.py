@@ -1674,16 +1674,22 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             is_single_step = \
                 self.vllm_config.scheduler_config.num_scheduler_steps == 1
             if is_prompt or is_single_step:
+                print("before execute")
+
                 self.execute_model(inputs, kv_caches, warmup_mode=True)
+                print("end execute")
+
             else:  # decode with multi-step
                 inputs = dataclasses.replace(inputs,
                                              is_first_multi_step=True,
                                              is_last_step=False)
+                print("before execute")
                 self.execute_model(inputs,
                                    kv_caches,
                                    warmup_mode=True,
                                    num_steps=2,
                                    seqs=seqs)
+                print("end execute")
                 inputs = dataclasses.replace(inputs,
                                              is_first_multi_step=False,
                                              is_last_step=True)
@@ -1743,10 +1749,25 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                f"free_mem:{free_mem}")
         logger.info(msg)
 
+    
     def warmup_all_buckets(self, buckets, is_prompt, kv_caches):
+        mid = len(buckets) // 2
+        a0 = buckets[:mid]  # 上半段
+        a1 = buckets[mid:] # 下半段
+        if torch.distributed.get_rank()==0:
+            print("!!!assing to rank0")
+            buckets=a0
+        elif torch.distributed.get_rank()==1:
+            print("!!!assing to rank1")
+            buckets=a1
+        else: assert False
+        
         for i, (batch_size, seq_len) in enumerate(reversed(buckets)):
             self.log_warmup('Prompt' if is_prompt else 'Decode', i,
                             len(buckets), batch_size, seq_len)
+            print(f"!!!woquwoqu {torch.distributed.get_rank()},{batch_size}, {seq_len}")
+            logger.info(f"!!!woquwoqu {torch.distributed.get_rank()},{batch_size}, {seq_len}")
+            
             self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches)
 
     def warmup_graphs(self,
@@ -1816,6 +1837,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
     @torch.inference_mode()
     def warmup_model(self, kv_caches: List[torch.Tensor]) -> None:
+        logger.info(f"!!!warmup_model")
         if profile := os.environ.get('VLLM_PT_PROFILE', None):
             phase, bs, seq_len, graph = profile.split('_')
             is_prompt = phase == 'prompt'

@@ -91,9 +91,12 @@ class LlamaMLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
+        print(f"!!! mlpfwd ,[rank],{get_tensor_model_parallel_rank()},[shape] ,{x.shape}")
         x, _ = self.gate_up_proj(x)
         x = self.act_fn(x)
         x, _ = self.down_proj(x)
+        print(f"!!! mlpfwd2 ,[rank],{get_tensor_model_parallel_rank()},[shape] ,{x.shape}")
+
         return x
 
 
@@ -215,7 +218,13 @@ class LlamaAttention(nn.Module):
         if (is_hpu and self.enable_zero_padding
                 and attn_metadata.seq_lens_tensor is not None):
             attn_output = attn_output * mask.unsqueeze(-1)
+        
+        
+        print(f"!!! attnfwd ,[rank],{get_tensor_model_parallel_rank()},[shape] ,{attn_output.shape}")
+
         output, _ = self.o_proj(attn_output)
+        print(f"!!! attnfwd2 ,[rank],{get_tensor_model_parallel_rank()},[shape] ,{output.shape}")
+
         return output
 
 
@@ -365,6 +374,9 @@ class LlamaModel(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+        
+        print("!!!fwd")
+        print(f"!!! interfwd ,[rank],{get_tensor_model_parallel_rank()},[shape] ,{input_ids.shape}")
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
