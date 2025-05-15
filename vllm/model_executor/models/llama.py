@@ -82,6 +82,7 @@ class LlamaMLP(nn.Module):
             input_size=intermediate_size,
             output_size=hidden_size,
             bias=bias,
+            reduce_results=False,
             quant_config=quant_config,
             prefix=f"{prefix}.down_proj",
         )
@@ -91,12 +92,17 @@ class LlamaMLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
-        print(f"!!! mlpfwd ,[rank],{get_tensor_model_parallel_rank()},[shape] ,{x.shape}")
+        # print(f"{get_tensor_model_parallel_rank()},before mlp sync")
+        # torch.hpu.synchronize()
+        # print(f"{get_tensor_model_parallel_rank()},end mlp sync")
+
+        # print(f"!!! mlpfwd ,[rank],{get_tensor_model_parallel_rank()},[shape] ,{x.shape}")
         x, _ = self.gate_up_proj(x)
         x = self.act_fn(x)
         x, _ = self.down_proj(x)
-        print(f"!!! mlpfwd2 ,[rank],{get_tensor_model_parallel_rank()},[shape] ,{x.shape}")
-
+        # print(f"{get_tensor_model_parallel_rank()},before mlp2 sync")
+        # torch.hpu.synchronize()
+        # print(f"{get_tensor_model_parallel_rank()},end mlp2 sync")
         return x
 
 
@@ -157,6 +163,7 @@ class LlamaAttention(nn.Module):
             input_size=self.total_num_heads * self.head_dim,
             output_size=hidden_size,
             bias=bias_o_proj,
+            reduce_results=False,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
@@ -206,12 +213,21 @@ class LlamaAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
+        # print(f"{get_tensor_model_parallel_rank()},before attn——p_11 sync")# rank1  挂了
+        # torch.hpu.synchronize()
+        # print(f"{get_tensor_model_parallel_rank()},end attn——p_11 sync")
         if (is_hpu and self.enable_zero_padding
                 and attn_metadata.seq_lens_tensor is not None):
             valid_len = attn_metadata.seq_lens_tensor
             mask = get_input_mask(hidden_states, valid_len)
             hidden_states = hidden_states * mask.unsqueeze(-1)
+        # print(f"{get_tensor_model_parallel_rank()},before attn——p0 sync")# rank1  挂了
+        # torch.hpu.synchronize()
+        # print(f"{get_tensor_model_parallel_rank()},end attn——p0 sync")
         qkv, _ = self.qkv_proj(hidden_states)
+        # print(f"{get_tensor_model_parallel_rank()},before attn——p1 sync")# rank1  挂了
+        # torch.hpu.synchronize()
+        # print(f"{get_tensor_model_parallel_rank()},end attn——p1 sync")
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
@@ -220,10 +236,15 @@ class LlamaAttention(nn.Module):
             attn_output = attn_output * mask.unsqueeze(-1)
         
         
-        print(f"!!! attnfwd ,[rank],{get_tensor_model_parallel_rank()},[shape] ,{attn_output.shape}")
+        
+        # print(f"{get_tensor_model_parallel_rank()},before attn sync")# rank1  挂了
+        # torch.hpu.synchronize()
+        # print(f"{get_tensor_model_parallel_rank()},end attn sync")
+
+        # print(f"!!! attnfwd ,[rank],{get_tensor_model_parallel_rank()},[shape] ,{attn_output.shape}")
 
         output, _ = self.o_proj(attn_output)
-        print(f"!!! attnfwd2 ,[rank],{get_tensor_model_parallel_rank()},[shape] ,{output.shape}")
+        # print(f"!!! attnfwd2 ,[rank],{get_tensor_model_parallel_rank()},[shape] ,{output.shape}")
 
         return output
 
@@ -292,6 +313,11 @@ class LlamaDecoderLayer(nn.Module):
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        
+        
+        # print(f"{get_tensor_model_parallel_rank()},before decodep0 sync")# rank1  挂了
+        # torch.hpu.synchronize()
+        # print(f"{get_tensor_model_parallel_rank()},end decodep1 sync")
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -325,7 +351,7 @@ class LlamaModel(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
-
+        self.count_tmp=0
         self.config = config
         self.quant_config = quant_config
         self.enable_zero_padding = os.environ.get('VLLM_ZERO_PADDING',
@@ -363,8 +389,16 @@ class LlamaModel(nn.Module):
                 ["hidden_states", "residual"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.embed_tokens(input_ids)
-
+        
+        # print(f"{get_tensor_model_parallel_rank()},before emb sync, shape{input_ids.shape}")# rank1  挂了
+        # torch.hpu.synchronize()
+        # print(f"{get_tensor_model_parallel_rank()},end emb sync, shape{input_ids.shape}")
+        tmp= self.embed_tokens(input_ids)
+        
+        # print(f"{get_tensor_model_parallel_rank()},before emb1 sync , shape{input_ids.shape}")# rank1  挂了
+        # torch.hpu.synchronize()
+        # print(f"{get_tensor_model_parallel_rank()},end emb1 sync")
+        return tmp
     def forward(
         self,
         input_ids: Optional[torch.Tensor],
@@ -375,6 +409,9 @@ class LlamaModel(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         
+        # print(f"{get_tensor_model_parallel_rank()},before stp11 sync")# rank1  挂了
+        # torch.hpu.synchronize()
+        # print(f"{get_tensor_model_parallel_rank()},end stp11 sync")
         print("!!!fwd")
         print(f"!!! interfwd ,[rank],{get_tensor_model_parallel_rank()},[shape] ,{input_ids.shape}")
         if get_pp_group().is_first_rank:
@@ -388,6 +425,9 @@ class LlamaModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        # print(f"{get_tensor_model_parallel_rank()},before stp12 sync")# rank1  挂了
+        # torch.hpu.synchronize()
+        # print(f"{get_tensor_model_parallel_rank()},end stp12 sync")
         if is_hpu:
             if (self.enable_zero_padding
                     and attn_metadata.seq_lens_tensor is not None):
@@ -397,6 +437,9 @@ class LlamaModel(nn.Module):
             import habana_frameworks.torch as htorch
             htorch.core.mark_step()
 
+        # print(f"{get_tensor_model_parallel_rank()},before stp0 sync")# rank1  挂了
+        # torch.hpu.synchronize()
+        # print(f"{get_tensor_model_parallel_rank()},end stp0 sync")
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             hidden_states, residual = layer(positions, hidden_states,
@@ -408,7 +451,20 @@ class LlamaModel(nn.Module):
                 "residual": residual
             })
 
+        # print(f"{get_tensor_model_parallel_rank()},before norm sync")
+        # torch.hpu.synchronize()
+        # print(f"{get_tensor_model_parallel_rank()},end norm sync")
         hidden_states, _ = self.norm(hidden_states, residual)
+        print(f"!!! exit forward ,[rank],{get_tensor_model_parallel_rank()},[shape] ,{input_ids.shape}")
+        if input_ids.shape[0]==32 and input_ids.shape[1]==1:
+            tmp=0
+            self.count_tmp+=1
+            if self.count_tmp==3:
+                b=0
+        
+        # print(f"{get_tensor_model_parallel_rank()},before norm2 sync")
+        # torch.hpu.synchronize()
+        # print(f"{get_tensor_model_parallel_rank()},end norm2 sync")
         return hidden_states
 
     def load_weights(self, weights: Iterable[Tuple[str,

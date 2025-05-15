@@ -1139,6 +1139,10 @@ class RowParallelLinear(LinearBase):
         if self.reduce_results and self.tp_size > 1:
             output = tensor_model_parallel_all_reduce(output_parallel)
         else:
+            import habana_frameworks.torch as htorch
+
+            htorch.core.mark_step()
+
             output = output_parallel
 
         output_bias = self.bias if self.skip_bias_add else None

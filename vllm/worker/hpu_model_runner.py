@@ -78,6 +78,8 @@ VLLM_DELAYED_SAMPLING = os.environ.get('VLLM_DELAYED_SAMPLING',
                                        'true').lower() == 'true'
 DUMMY_TOKEN_ID = -1
 
+def rank_print(msg):
+    print(f"[{torch.distributed.get_rank()}]:,{msg},  {os.getpid()}")
 
 def subtuple(obj: object,
              typename: str,
@@ -413,9 +415,15 @@ class HpuModelAdapter:
         with set_forward_context(kwargs['attn_metadata'], self.vllm_config,
                                  virtual_engine):
             hidden_states = self.model(*args, **kwargs)
+            
+            # rank_print("view and index sync start ")
             hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
             hidden_states = hidden_states.index_select(0,
                                                        selected_token_indices)
+            # torch.hpu.synchronize()
+
+            # rank_print("view and index sync end ")
+
         return hidden_states
 
     def compute_logits(self, *args, **kwargs):
@@ -1610,6 +1618,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                         is_pt_profiler_run=False,
                         is_lora_profile_run=False,
                         temperature=0) -> None:
+        rank_print("a1")
         use_graphs = self._use_graphs(batch_size, seq_len, is_prompt)
         scenario_name = ("warmup_"
                          f"{'prompt' if is_prompt else 'decode'}_"
@@ -1639,9 +1648,13 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     dummy_lora_requests[idx % len(dummy_lora_requests)]
                     for idx in range(batch_size)
                 ]
+        rank_print("a2")
+
         self.profiler.start('internal', scenario_name)
         times = 3 if use_graphs or is_pt_profiler_run else 1
         if is_prompt:
+            rank_print("a3")
+
             seqs = [
                 self.create_dummy_seq_group_metadata(
                     i,
@@ -1652,6 +1665,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     temperature=temperature) for i in range(batch_size)
             ]
         else:
+            rank_print("a4")
+
             # FIXME: seq_len is actually number of blocks
             blocks = [seq_len // batch_size for _ in range(batch_size)]
             blocks[0] += seq_len % batch_size
@@ -1664,32 +1679,38 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     if dummy_lora_requests_per_seq else None,
                     temperature=temperature) for i, b in enumerate(blocks)
             ]
+        rank_print("before warm up sync")
         torch.hpu.synchronize()
+        rank_print("end warm up sync")
+
         profiler = None
         if is_pt_profiler_run and self.is_driver_worker:
             profiler = setup_profiler()
             profiler.start()
         for _ in range(times):
+            
+            
+            rank_print(f"iter {_}, is_prompt {is_prompt},times {times}")
             inputs = self.prepare_model_input(seqs)
             is_single_step = \
                 self.vllm_config.scheduler_config.num_scheduler_steps == 1
             if is_prompt or is_single_step:
-                print("before execute")
+                print(f"{torch.distributed.get_rank()},before execute single")
 
                 self.execute_model(inputs, kv_caches, warmup_mode=True)
-                print("end execute")
+                print(f"{torch.distributed.get_rank()},end execute single")
 
             else:  # decode with multi-step
                 inputs = dataclasses.replace(inputs,
                                              is_first_multi_step=True,
                                              is_last_step=False)
-                print("before execute")
+                print(f"{torch.distributed.get_rank()}:before execute decode")
                 self.execute_model(inputs,
                                    kv_caches,
                                    warmup_mode=True,
                                    num_steps=2,
                                    seqs=seqs)
-                print("end execute")
+                print(f"{torch.distributed.get_rank()}:end execute deocde")
                 inputs = dataclasses.replace(inputs,
                                              is_first_multi_step=False,
                                              is_last_step=True)
@@ -1698,7 +1719,15 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                    warmup_mode=True,
                                    num_steps=2,
                                    seqs=seqs)
+            print(f"!!!rank:{torch.distributed.get_rank()}!!!before barrier")
+
+            #should we use barrier here?
+            # torch.distributed.barrier()
+            print(f"!!!rank:{torch.distributed.get_rank()}!!!end barrier")
+            print(f"!!!rank:{torch.distributed.get_rank()}!!!start sync")
+
             torch.hpu.synchronize()
+            print(f"!!!rank: {torch.distributed.get_rank()} end sync")
             if profiler:
                 profiler.step()
         if profiler:
@@ -1754,6 +1783,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         mid = len(buckets) // 2
         a0 = buckets[:mid]  # 上半段
         a1 = buckets[mid:] # 下半段
+        if len(a0)<len(a1):
+            a0.append(a1[-1])
+        assert len(a0)==len(a1)
         if torch.distributed.get_rank()==0:
             print("!!!assing to rank0")
             buckets=a0
@@ -1761,14 +1793,21 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             print("!!!assing to rank1")
             buckets=a1
         else: assert False
-        
+        rank_print(f"buckent len is {len(buckets)} ")
         for i, (batch_size, seq_len) in enumerate(reversed(buckets)):
+            rank_print("start log warmup")
+            torch.distributed.barrier()
+            torch.hpu.synchronize()
+
             self.log_warmup('Prompt' if is_prompt else 'Decode', i,
                             len(buckets), batch_size, seq_len)
-            print(f"!!!woquwoqu {torch.distributed.get_rank()},{batch_size}, {seq_len}")
-            logger.info(f"!!!woquwoqu {torch.distributed.get_rank()},{batch_size}, {seq_len}")
+            rank_print(f"!!! bs:{batch_size}, seq:{seq_len}, iter:{i}")
+            # logger.info(f"!!!woquwoqu rank{torch.distributed.get_rank()},{batch_size}, {seq_len}")
             
             self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches)
+            
+        rank_print("exitst onece")
+
 
     def warmup_graphs(self,
                       strategy,
@@ -1889,6 +1928,10 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                     kv_caches)
             self.warmup_all_buckets(self.bucketing_ctx.decode_buckets, False,
                                     kv_caches)
+            # rank_print("start real barrier")
+            # torch.distributed.barrier()
+            # rank_print("end real barrier")
+
 
             if not self.enforce_eager and htorch.utils.internal.is_lazy():
                 assert self.mem_margin is not None, \
@@ -1962,6 +2005,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             f"allocated {format_bytes(end_mem - start_mem)} of device memory")
         logger.info(msg)
         self.profiler.end()
+        
 
     def finish_measurements(self):
         from neural_compressor.torch.quantization import finalize_calibration
@@ -2382,6 +2426,9 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                         selected_token_indices=sampling_metadata.
                         selected_token_indices)
 
+                rank_print(f",#2412 model fwd start sync")
+                torch.hpu.synchronize()
+                rank_print(f",#2412 model fwd end sync")
                 if self.lora_config:
                     LoraMask.setLoraMask(
                         lora_logits_mask.index_select(
@@ -2400,10 +2447,10 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                                                        sampling_metadata)
                 htorch.core.mark_step()
                 # Only perform sampling in the driver worker.
-                if not self.is_driver_worker:
+                if not self.is_driver_worker: #continue
                     continue
 
-                if use_delayed_sampling:
+                if use_delayed_sampling:  #F
                     fake_output = self._delayed_sampler_outputs(model_input)
 
                 with self.profiler.record_event(
@@ -2451,6 +2498,9 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                                     len(data.output_token_ids)
                     seq_group_metadata_list, _, _ = self._add_dummy_seq(
                         seq_group_metadata_list, is_prompt=False)
+                    rank_print(f",#2484 model fwd start sync")
+                    torch.hpu.synchronize()
+                    rank_print(f",#2486 model fwd end sync")
                     for seq_group_metadata in seq_group_metadata_list:
                         for data in seq_group_metadata.seq_data.values():
                             max_output_len = sampling_metadata.seq_groups[
@@ -2468,9 +2518,17 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                                 else:
                                     try_revert_dummy_output_tokens()
                                     return []
+                    rank_print(f",#p11 model fwd st sync")
 
+                    torch.hpu.synchronize()
+                    rank_print(f",#p11 model fwd end sync")
                     result = self._prepare_decode(seq_group_metadata_list,
                                                   output=output)
+                    
+                    rank_print(f",#p22 model fwd st sync")
+
+                    torch.hpu.synchronize()
+                    rank_print(f",#p22 model fwd end sync")
                     if self.lora_config:
                         lora_mapping = LoRAMapping(
                             **dict(index_mapping=result.lora_index_mapping,
@@ -2513,23 +2571,29 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                     real_batch_size=real_batch_size,
                     is_prompt=is_prompt)
                 self.profiler.record_counter(self.event_start, counters)
-            if num_steps == 1:
-                if self.return_hidden_states:
+            rank_print(f",#2546 model fwd start sync")
+            torch.hpu.synchronize()
+            rank_print(f",#2548 model fwd end sync")
+            if num_steps == 1:   #1
+                if self.return_hidden_states:  #F
                     # we only need to pass hidden states of most recent token
                     assert model_input.sampling_metadata is not None
                     if model_input.is_prompt:
                         output.prefill_hidden_states = hidden_states
                     output.hidden_states = hidden_states
-                if use_delayed_sampling:
+                if use_delayed_sampling:   #F
                     if self.is_driver_worker:
                         return [fake_output]
                     else:
                         return []
-
+                #F
+                rank_print("!!!return here")
                 return [output] if self.is_driver_worker else []
             else:
                 return []
-
+        rank_print(f",#2562 model fwd start sync")
+        torch.hpu.synchronize()
+        rank_print(f",#2562 model fwd end sync")
         return output if type(output) is list else [output]
 
     def _delayed_sampler_outputs(self, model_input):
