@@ -2021,6 +2021,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             torch.hpu.synchronize()
 
             torch.distributed.barrier()
+            mid_time = time.perf_counter()
             
             os.environ["FAKE_COMM"] = "False"
             # rank_print("start real barrier")
@@ -2115,8 +2116,10 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         end_time = time.perf_counter()
         end_mem = HabanaMemoryProfiler.current_device_memory_usage()
         elapsed_time = end_time - start_time
+        compile_time = mid_time-start_time
+        graph_time = end_time - mid_time
         msg = (
-            f"Warmup finished in {elapsed_time:.0f} secs, "
+            f"Warmup finished in {elapsed_time:.0f} secs, compile:{compile_time:.0f},graph:{graph_time:.0f}"
             f"allocated {format_bytes(end_mem - start_mem)} of device memory")
         logger.info(msg)
         self.profiler.end()
