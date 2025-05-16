@@ -2014,6 +2014,10 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             #lazy compile recipe
             
             os.environ["FAKE_COMM"] = "True"
+            
+       
+            
+
             self.warmup_all_buckets(self.bucketing_ctx.prompt_buckets, True,
                                     kv_caches)
             self.warmup_all_buckets(self.bucketing_ctx.decode_buckets, False,
@@ -2022,8 +2026,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
             torch.distributed.barrier()
             mid_time = time.perf_counter()
-            
             os.environ["FAKE_COMM"] = "False"
+
             # rank_print("start real barrier")
             # torch.distributed.barrier()
             # rank_print("end real barrier")
@@ -2075,13 +2079,29 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                                  'min_tokens')
                 decode_strategy = os.environ.get('VLLM_GRAPH_DECODE_STRATEGY',
                                                  'max_bs')
+                
+                
+                def get_bkc(bkc_old):
+                    rank_to_data=self.assign_elements(bkc_old,2)
+                    l0=rank_to_data[0]
+                    l1=rank_to_data[1]
+                    bkc=[]
+                    if torch.distributed.get_rank()==0:
+                        l0.extend(l1)
+                        bkc=l0
+                    elif torch.distributed.get_rank()==1:
+                        l1.extend(l0)
+                        bkc=l1
+                    return bkc
+
+                b=0
                 mem_post_prompt, prompt_batch_seq, prompt_captured_all = \
                     self.warmup_graphs(
-                    prompt_strategy, self.bucketing_ctx.prompt_buckets,
+                    prompt_strategy, get_bkc(self.bucketing_ctx.prompt_buckets),
                     True, kv_caches, prompt_available_memory)
                 mem_post_decode, decode_batch_seq, decode_captured_all = \
                     self.warmup_graphs(
-                    decode_strategy, self.bucketing_ctx.decode_buckets,
+                    decode_strategy, get_bkc(self.bucketing_ctx.decode_buckets),
                     False, kv_caches, decode_available_memory)
 
                 # Not all prompt buckets were captured, but all decode buckets
@@ -2122,6 +2142,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             f"Warmup finished in {elapsed_time:.0f} secs, compile:{compile_time:.0f},graph:{graph_time:.0f}"
             f"allocated {format_bytes(end_mem - start_mem)} of device memory")
         logger.info(msg)
+
         self.profiler.end()
         
 

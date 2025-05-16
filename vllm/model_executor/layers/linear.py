@@ -1143,6 +1143,7 @@ class RowParallelLinear(LinearBase):
             output = tensor_model_parallel_all_reduce(output_parallel)
         else:
             import habana_frameworks.torch as htorch
+            # print("yongleyongle")
 
             htorch.core.mark_step()
 
