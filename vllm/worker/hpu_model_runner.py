@@ -1943,6 +1943,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             available_mem -= used_mem
             total_mem += used_mem
             total_batch_seq += batch_seq
+            
+                        # self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches)
 
         return total_mem, total_batch_seq, captured_all
 
@@ -2009,6 +2011,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                            'Please update Gaudi Software Suite.')
         with compile_only_mode_context(
         ) if can_use_compile_only_mode else contextlib.nullcontext():
+            #lazy compile recipe
             self.warmup_all_buckets(self.bucketing_ctx.prompt_buckets, True,
                                     kv_caches)
             self.warmup_all_buckets(self.bucketing_ctx.decode_buckets, False,
@@ -2016,8 +2019,28 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             # rank_print("start real barrier")
             # torch.distributed.barrier()
             # rank_print("end real barrier")
-
-
+            # 4 8 16 32
+            #   tp         rank0   rank1
+            #  iter1            4
+            #  iter             8
+            # iter              16
+            
+            
+            
+            # compile.
+            #  allreduce / gather/ broadcast
+            #                mark_step  shape=4,  transformer lay.
+            # 4 8 16 32
+            #   tp          rank0               rank1
+            #  iter1         4                    16           -> shape4 & shape 16 recipe ->disk2
+            #  iter          8                    32
+            
+            
+            
+            
+            #
+            # graph 优化.
+            # 判断是不是图模式。
             if not self.enforce_eager and htorch.utils.internal.is_lazy():
                 assert self.mem_margin is not None, \
                     ("HabanaWorker.determine_num_available_blocks needs "
