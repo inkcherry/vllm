@@ -442,6 +442,8 @@ class GroupCoordinator:
         #                          gather_list,
         #                          dst=self.ranks[dst],
         #                          group=self.device_group)
+        import habana_frameworks.torch as htorch
+        htorch.core.mark_step()
         if self.rank_in_group == dst:
             output_tensor = torch.cat(gather_list, dim=dim)
         else:

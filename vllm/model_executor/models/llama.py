@@ -412,8 +412,9 @@ class LlamaModel(nn.Module):
         # print(f"{get_tensor_model_parallel_rank()},before stp11 sync")# rank1  挂了
         # torch.hpu.synchronize()
         # print(f"{get_tensor_model_parallel_rank()},end stp11 sync")
-        print("!!!fwd")
-        print(f"!!! interfwd ,[rank],{get_tensor_model_parallel_rank()},[shape] ,{input_ids.shape}")
+        # print("!!!fwd")
+        # print(f"!!! interfwd ,[rank],{get_tensor_model_parallel_rank()},[shape] ,{input_ids.shape}")
+        
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -455,12 +456,12 @@ class LlamaModel(nn.Module):
         # torch.hpu.synchronize()
         # print(f"{get_tensor_model_parallel_rank()},end norm sync")
         hidden_states, _ = self.norm(hidden_states, residual)
-        print(f"!!! exit forward ,[rank],{get_tensor_model_parallel_rank()},[shape] ,{input_ids.shape}")
-        if input_ids.shape[0]==32 and input_ids.shape[1]==1:
-            tmp=0
-            self.count_tmp+=1
-            if self.count_tmp==3:
-                b=0
+        # print(f"!!! exit forward ,[rank],{get_tensor_model_parallel_rank()},[shape] ,{input_ids.shape}")
+        # if input_ids.shape[0]==32 and input_ids.shape[1]==1:
+        #     tmp=0
+        #     self.count_tmp+=1
+        #     if self.count_tmp==3:
+        #         b=0
         
         # print(f"{get_tensor_model_parallel_rank()},before norm2 sync")
         # torch.hpu.synchronize()
