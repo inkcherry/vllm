@@ -82,7 +82,6 @@ class LlamaMLP(nn.Module):
             input_size=intermediate_size,
             output_size=hidden_size,
             bias=bias,
-            reduce_results=False,
             quant_config=quant_config,
             prefix=f"{prefix}.down_proj",
         )
@@ -163,7 +162,6 @@ class LlamaAttention(nn.Module):
             input_size=self.total_num_heads * self.head_dim,
             output_size=hidden_size,
             bias=bias_o_proj,
-            reduce_results=False,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )

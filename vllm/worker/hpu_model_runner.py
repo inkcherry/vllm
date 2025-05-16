@@ -1680,7 +1680,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     temperature=temperature) for i, b in enumerate(blocks)
             ]
         # rank_print("before warm up sync")
-        # torch.hpu.synchronize()
+        torch.hpu.synchronize()
         # rank_print("end warm up sync")
 
         profiler = None
@@ -1704,13 +1704,13 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 inputs = dataclasses.replace(inputs,
                                              is_first_multi_step=True,
                                              is_last_step=False)
-                print(f"{torch.distributed.get_rank()}:before execute decode")
+                # print(f"{torch.distributed.get_rank()}:before execute decode")
                 self.execute_model(inputs,
                                    kv_caches,
                                    warmup_mode=True,
                                    num_steps=2,
                                    seqs=seqs)
-                print(f"{torch.distributed.get_rank()}:end execute deocde")
+                # print(f"{torch.distributed.get_rank()}:end execute deocde")
                 inputs = dataclasses.replace(inputs,
                                              is_first_multi_step=False,
                                              is_last_step=True)
@@ -1899,7 +1899,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         captured_all = True
         warmed_random_sampler_bs: Set[int] = set()
         
-        rank_to_data=self.assign_elements(buckets,2)
+        # rank_to_data=self.assign_elements(buckets,2)
         
         
         # mid = len(buckets) // 2
@@ -1963,7 +1963,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
     @torch.inference_mode()
     def warmup_model(self, kv_caches: List[torch.Tensor]) -> None:
-        logger.info(f"!!!warmup_model")
+        # logger.info(f"!!!warmup_model")
         if profile := os.environ.get('VLLM_PT_PROFILE', None):
             phase, bs, seq_len, graph = profile.split('_')
             is_prompt = phase == 'prompt'
@@ -2012,10 +2012,17 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         with compile_only_mode_context(
         ) if can_use_compile_only_mode else contextlib.nullcontext():
             #lazy compile recipe
+            
+            os.environ["FAKE_COMM"] = "True"
             self.warmup_all_buckets(self.bucketing_ctx.prompt_buckets, True,
                                     kv_caches)
             self.warmup_all_buckets(self.bucketing_ctx.decode_buckets, False,
                                     kv_caches)
+            torch.hpu.synchronize()
+
+            torch.distributed.barrier()
+            
+            os.environ["FAKE_COMM"] = "False"
             # rank_print("start real barrier")
             # torch.distributed.barrier()
             # rank_print("end real barrier")
