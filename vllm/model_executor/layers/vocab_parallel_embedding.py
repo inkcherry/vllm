@@ -419,8 +419,9 @@ class VocabParallelEmbedding(torch.nn.Module):
         #
         import os
         use_fake_comm = os.getenv("FAKE_COMM", "False").lower() == "true"
+        
         if not use_fake_comm:
-            
+            # print("meiyongmeiyong")
             output = tensor_model_parallel_all_reduce(output_parallel)
         else:
             import habana_frameworks.torch as htorch

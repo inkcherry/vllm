@@ -441,7 +441,9 @@ class GroupCoordinator:
         use_fake_comm = os.getenv("FAKE_COMM", "False").lower() == "true"
 
         # Gather.
-        if use_fake_comm:
+        if not use_fake_comm:
+            # print("meiyongmeiyong")
+
             torch.distributed.gather(input_,
                                     gather_list,
                                     dst=self.ranks[dst],
