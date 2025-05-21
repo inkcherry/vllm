@@ -63,6 +63,7 @@ from vllm.worker.model_runner_base import (
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
+from contextlib import contextmanager
 
 logger = init_logger(__name__)
 
@@ -123,7 +124,18 @@ def setup_profiler():
         with_stack=True)
     return profiler
 
-
+@contextmanager
+def fake_comm_context(enabled: bool):
+    if enabled:
+        os.environ["FAKE_COMM"] = "True"
+        try:
+            yield
+        finally:
+            torch.hpu.synchronize()
+            torch.distributed.barrier()
+            os.environ["FAKE_COMM"] = "False"
+    else:
+        yield
 def round_up(value: int, k: int) -> int:
     return (value + k - 1) // k * k
 
@@ -705,6 +717,19 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         self.skip_warmup = os.environ.get('VLLM_SKIP_WARMUP',
                                           'false').lower() == 'true'
+        
+        self.fast_warmup = os.environ.get('VLLM_FAST_WARMUP',
+                                          'false').lower() == 'true'
+        
+        if self.fast_warmup  and self.skip_warmup:
+            logger.warning( 
+                "Both VLLM_FAST_WARMUP and VLLM_SKIP_WARMUP are set to true. "
+                "VLLM_FAST_WARMUP will be ignored.")
+            
+        if self.fast_warmup and "PT_HPU_RECIPE_CACHE_CONFIG" not in os.environ:
+            logger.warning(
+                "VLLM_FAST_WARMUP is set to true but PT_HPU_RECIPE_CACHE_CONFIG "
+                "is not set. Fast warmup will be ignored.")
 
     def load_model(self) -> None:
         import habana_frameworks.torch.core as htcore
@@ -1852,6 +1877,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                f'buckets:{sorted(list(graphed))}')
         logger.info(msg)
 
+            
     @torch.inference_mode()
     def warmup_model(self, kv_caches: List[torch.Tensor]) -> None:
         if profile := os.environ.get('VLLM_PT_PROFILE', None):
@@ -1903,16 +1929,14 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         ) if can_use_compile_only_mode else contextlib.nullcontext():
             #lazy compile recipe
             
-            os.environ["FAKE_COMM"] = "True"
-            self.warmup_all_buckets(self.bucketing_ctx.prompt_buckets, True,
-                                    kv_caches)
-            self.warmup_all_buckets(self.bucketing_ctx.decode_buckets, False,
-                                    kv_caches)
-            torch.hpu.synchronize()
-
-            torch.distributed.barrier()
+            
+            with fake_comm_context(self.fast_warmup):
+                self.warmup_all_buckets(self.bucketing_ctx.prompt_buckets, True,
+                                        kv_caches)
+                self.warmup_all_buckets(self.bucketing_ctx.decode_buckets, False,
+                                        kv_caches)
+           
             mid_time = time.perf_counter()
-            os.environ["FAKE_COMM"] = "False"
 
          
             if not self.enforce_eager and htorch.utils.internal.is_lazy():
@@ -1942,20 +1966,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 decode_strategy = os.environ.get('VLLM_GRAPH_DECODE_STRATEGY',
                                                  'max_bs')
                 
-                
-                # def get_bkc(bkc_old):
-                #     
-                #     l0=rank_to_data[0]
-                #     l1=rank_to_data[1]
-                #     bkc=[]
-                #     if torch.distributed.get_rank()==0:
-                #         l0.extend(l1)
-                #         bkc=l0
-                #     elif torch.distributed.get_rank()==1:
-                #         l1.extend(l0)
-                #         bkc=l1
-                #     return bkc
-                
+
                 def reorder_buckets(buckets):
                     rank_to_data = self.assign_elements(buckets, torch.distributed.get_world_size())
                     cur_rank = torch.distributed.get_rank()
