@@ -1139,7 +1139,6 @@ class RowParallelLinear(LinearBase):
         import os 
         use_fake_comm = os.getenv("FAKE_COMM", "False").lower() == "true"
         if self.reduce_results and self.tp_size > 1 and not use_fake_comm:
-            # print("meiyongmeiyong")
             output = tensor_model_parallel_all_reduce(output_parallel)
         else:
             import habana_frameworks.torch as htorch

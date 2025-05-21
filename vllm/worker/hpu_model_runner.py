@@ -413,12 +413,9 @@ class HpuModelAdapter:
         with set_forward_context(kwargs['attn_metadata'], self.vllm_config,
                                  virtual_engine):
             hidden_states = self.model(*args, **kwargs)
-            
             hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
             hidden_states = hidden_states.index_select(0,
                                                        selected_token_indices)
- 
-
         return hidden_states
 
     def compute_logits(self, *args, **kwargs):
@@ -1642,11 +1639,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     dummy_lora_requests[idx % len(dummy_lora_requests)]
                     for idx in range(batch_size)
                 ]
-
         self.profiler.start('internal', scenario_name)
         times = 3 if use_graphs or is_pt_profiler_run else 1
         if is_prompt:
-
             seqs = [
                 self.create_dummy_seq_group_metadata(
                     i,
@@ -1657,7 +1652,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     temperature=temperature) for i in range(batch_size)
             ]
         else:
-
             # FIXME: seq_len is actually number of blocks
             blocks = [seq_len // batch_size for _ in range(batch_size)]
             blocks[0] += seq_len % batch_size
@@ -1671,21 +1665,16 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     temperature=temperature) for i, b in enumerate(blocks)
             ]
         torch.hpu.synchronize()
-
         profiler = None
         if is_pt_profiler_run and self.is_driver_worker:
             profiler = setup_profiler()
             profiler.start()
         for _ in range(times):
-            
-            
             inputs = self.prepare_model_input(seqs)
             is_single_step = \
                 self.vllm_config.scheduler_config.num_scheduler_steps == 1
             if is_prompt or is_single_step:
-
                 self.execute_model(inputs, kv_caches, warmup_mode=True)
-
             else:  # decode with multi-step
                 inputs = dataclasses.replace(inputs,
                                              is_first_multi_step=True,
@@ -1703,8 +1692,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                    warmup_mode=True,
                                    num_steps=2,
                                    seqs=seqs)
-       
-
             torch.hpu.synchronize()
             if profiler:
                 profiler.step()
@@ -1756,9 +1743,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                f"free_mem:{free_mem}")
         logger.info(msg)
 
-    
-
-    
     def assign_elements(self, lst, n_ranks):
         if not lst:
             return [[] for _ in range(n_ranks)]
@@ -1788,10 +1772,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
     
     def warmup_all_buckets(self, buckets, is_prompt, kv_caches):
         rank_to_data=self.assign_elements(buckets,2)
-        # rank_to_data2=self.assign_elements(buckets,4)
-
-        
-    
         a0 =rank_to_data[0]
         a1=rank_to_data[1]
         if len(a0)<len(a1):
@@ -1803,14 +1783,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             buckets=a1
         else: assert False
         for i, (batch_size, seq_len) in enumerate(reversed(buckets)):
-          
-
             self.log_warmup('Prompt' if is_prompt else 'Decode', i,
                             len(buckets), batch_size, seq_len)
-            
             self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches)
-            
-
 
     def warmup_graphs(self,
                       strategy,
@@ -1864,7 +1839,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             available_mem -= used_mem
             total_mem += used_mem
             total_batch_seq += batch_seq
-            
 
         return total_mem, total_batch_seq, captured_all
 
@@ -2545,8 +2519,6 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
               
                     result = self._prepare_decode(seq_group_metadata_list,
                                                   output=output)
-                    
-                 
                     if self.lora_config:
                         lora_mapping = LoRAMapping(
                             **dict(index_mapping=result.lora_index_mapping,
@@ -2589,10 +2561,8 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                     real_batch_size=real_batch_size,
                     is_prompt=is_prompt)
                 self.profiler.record_counter(self.event_start, counters)
-            # rank_print(f",#2546 model fwd start sync")
-            # torch.hpu.synchronize()
-            # rank_print(f",#2548 model fwd end sync")
-            if num_steps == 1:   #1
+        
+            if num_steps == 1:
                 if self.return_hidden_states:
                     # we only need to pass hidden states of most recent token
                     assert model_input.sampling_metadata is not None

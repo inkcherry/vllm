@@ -91,11 +91,9 @@ class LlamaMLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
-
         x, _ = self.gate_up_proj(x)
         x = self.act_fn(x)
         x, _ = self.down_proj(x)
-     
         return x
 
 
@@ -205,23 +203,18 @@ class LlamaAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-       
         if (is_hpu and self.enable_zero_padding
                 and attn_metadata.seq_lens_tensor is not None):
             valid_len = attn_metadata.seq_lens_tensor
             mask = get_input_mask(hidden_states, valid_len)
             hidden_states = hidden_states * mask.unsqueeze(-1)
-    
         qkv, _ = self.qkv_proj(hidden_states)
-    
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         if (is_hpu and self.enable_zero_padding
                 and attn_metadata.seq_lens_tensor is not None):
             attn_output = attn_output * mask.unsqueeze(-1)
-        
-
         output, _ = self.o_proj(attn_output)
 
         return output
@@ -291,6 +284,7 @@ class LlamaDecoderLayer(nn.Module):
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Self Attention
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
@@ -323,6 +317,7 @@ class LlamaModel(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
+
         self.config = config
         self.quant_config = quant_config
         self.enable_zero_padding = os.environ.get('VLLM_ZERO_PADDING',
@@ -371,8 +366,6 @@ class LlamaModel(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        
-
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -404,9 +397,7 @@ class LlamaModel(nn.Module):
                 "residual": residual
             })
 
-
         hidden_states, _ = self.norm(hidden_states, residual)
-
         return hidden_states
 
     def load_weights(self, weights: Iterable[Tuple[str,
