@@ -442,7 +442,6 @@ class GroupCoordinator:
 
         # Gather.
         if not use_fake_comm:
-            # print("meiyongmeiyong")
 
             torch.distributed.gather(input_,
                                     gather_list,
