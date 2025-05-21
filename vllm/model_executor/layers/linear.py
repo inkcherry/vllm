@@ -32,7 +32,7 @@ WEIGHT_LOADER_V2_SUPPORTED = [
     "MarlinLinearMethod", "QQQLinearMethod", "GPTQMarlin24LinearMethod",
     "TPUInt8LinearMethod", "GPTQLinearMethod", "GPTQHPULinearMethod",
     "FBGEMMFp8LinearMethod", "ModelOptFp8LinearMethod", "IPEXAWQLinearMethod",
-    "IPEXGPTQLinearMethod", "HQQMarlinMethod", "QuarkLinearMethod", 
+    "IPEXGPTQLinearMethod", "HQQMarlinMethod", "QuarkLinearMethod",
     "AWQHPULinearMethod"
 ]
 
@@ -1136,7 +1136,7 @@ class RowParallelLinear(LinearBase):
         output_parallel = self.quant_method.apply(self,
                                                   input_parallel,
                                                   bias=bias_)
-        import os 
+        import os
         use_fake_comm = os.getenv("FAKE_COMM", "False").lower() == "true"
         if self.reduce_results and self.tp_size > 1 and not use_fake_comm:
             output = tensor_model_parallel_all_reduce(output_parallel)
@@ -1146,7 +1146,6 @@ class RowParallelLinear(LinearBase):
             htorch.core.mark_step()
             output = output_parallel
             htorch.core.mark_step()
-
 
         output_bias = self.bias if self.skip_bias_add else None
 

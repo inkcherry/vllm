@@ -444,9 +444,9 @@ class GroupCoordinator:
         if not use_fake_comm:
 
             torch.distributed.gather(input_,
-                                    gather_list,
-                                    dst=self.ranks[dst],
-                                    group=self.device_group)
+                                     gather_list,
+                                     dst=self.ranks[dst],
+                                     group=self.device_group)
         else:
             import habana_frameworks.torch as htorch
             htorch.core.mark_step()
