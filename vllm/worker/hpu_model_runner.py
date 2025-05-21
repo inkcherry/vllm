@@ -1746,43 +1746,39 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
     def assign_elements(self, lst, n_ranks):
         if not lst:
             return [[] for _ in range(n_ranks)]
-
+        
         ranks = []
         for i in range(len(lst)):
             cycle_step = 2 * n_ranks
             pos_in_cycle = i % cycle_step
-            if pos_in_cycle < n_ranks:
+            if pos_in_cycle < n_ranks:  
                 rank = pos_in_cycle
-            else:
+            else:  
                 rank = (2 * n_ranks - 1) - pos_in_cycle
             ranks.append(rank)
-
+        
         rank_dict = {r: [] for r in range(n_ranks)}
         for idx, r in enumerate(ranks):
             rank_dict[r].append(lst[idx])
-
+        
         max_len = max(len(v) for v in rank_dict.values())
         for r in range(n_ranks):
             current_len = len(rank_dict[r])
             need = max_len - current_len
             if need > 0:
                 rank_dict[r].extend([lst[0]] * need)
-
+        
         return [rank_dict[r] for r in range(n_ranks)]
-
+    
     def warmup_all_buckets(self, buckets, is_prompt, kv_caches):
-        rank_to_data = self.assign_elements(buckets, 2)
-        a0 = rank_to_data[0]
-        a1 = rank_to_data[1]
-        if len(a0) < len(a1):
-            a0.append(a1[-1])
-        assert len(a0) == len(a1)
-        if torch.distributed.get_rank() == 0:
-            buckets = a0
-        elif torch.distributed.get_rank() == 1:
-            buckets = a1
-        else:
-            assert False
+        rank_to_data=self.assign_elements(buckets,2)
+        
+        # Check that all elements in rank_to_data have the same length
+        lengths = [len(x) for x in rank_to_data]
+        assert all(l == lengths[0] for l in lengths), "Not all elements in rank_to_data have the same length"
+        
+        buckets=rank_to_data[torch.distributed.get_rank()]
+
         for i, (batch_size, seq_len) in enumerate(reversed(buckets)):
             self.log_warmup('Prompt' if is_prompt else 'Decode', i,
                             len(buckets), batch_size, seq_len)
@@ -1812,7 +1808,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         buckets = list(sorted(buckets, key=ordering))
         captured_all = True
         warmed_random_sampler_bs: Set[int] = set()
-
+        
+   
+        
         for idx, (batch_size, seq_len) in enumerate(buckets):
             # Graph memory usage is proportional to seq dimension in a batch
             batch_seq = batch_size * seq_len if is_prompt else batch_size
@@ -1904,7 +1902,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         with compile_only_mode_context(
         ) if can_use_compile_only_mode else contextlib.nullcontext():
             #lazy compile recipe
-
+            
             os.environ["FAKE_COMM"] = "True"
             self.warmup_all_buckets(self.bucketing_ctx.prompt_buckets, True,
                                     kv_caches)
@@ -1916,6 +1914,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             mid_time = time.perf_counter()
             os.environ["FAKE_COMM"] = "False"
 
+         
             if not self.enforce_eager and htorch.utils.internal.is_lazy():
                 assert self.mem_margin is not None, \
                     ("HabanaWorker.determine_num_available_blocks needs "
@@ -1942,27 +1941,36 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                                  'min_tokens')
                 decode_strategy = os.environ.get('VLLM_GRAPH_DECODE_STRATEGY',
                                                  'max_bs')
-
-                def get_bkc(bkc_old):
-                    rank_to_data = self.assign_elements(bkc_old, 2)
-                    l0 = rank_to_data[0]
-                    l1 = rank_to_data[1]
-                    bkc = []
-                    if torch.distributed.get_rank() == 0:
-                        l0.extend(l1)
-                        bkc = l0
-                    elif torch.distributed.get_rank() == 1:
-                        l1.extend(l0)
-                        bkc = l1
-                    return bkc
+                
+                
+                # def get_bkc(bkc_old):
+                #     
+                #     l0=rank_to_data[0]
+                #     l1=rank_to_data[1]
+                #     bkc=[]
+                #     if torch.distributed.get_rank()==0:
+                #         l0.extend(l1)
+                #         bkc=l0
+                #     elif torch.distributed.get_rank()==1:
+                #         l1.extend(l0)
+                #         bkc=l1
+                #     return bkc
+                
+                def reorder_buckets(buckets):
+                    rank_to_data = self.assign_elements(buckets, torch.distributed.get_world_size())
+                    cur_rank = torch.distributed.get_rank()
+                    reordered = [rank_to_data[cur_rank]] + rank_to_data[:cur_rank] + rank_to_data[cur_rank+1:]
+                    flattened_buckets = [item for sublist in reordered for item in sublist]
+                    
+                    return flattened_buckets
 
                 mem_post_prompt, prompt_batch_seq, prompt_captured_all = \
                     self.warmup_graphs(
-                    prompt_strategy, get_bkc(self.bucketing_ctx.prompt_buckets),
+                    prompt_strategy, reorder_buckets(self.bucketing_ctx.prompt_buckets),
                     True, kv_caches, prompt_available_memory)
                 mem_post_decode, decode_batch_seq, decode_captured_all = \
                     self.warmup_graphs(
-                    decode_strategy, get_bkc(self.bucketing_ctx.decode_buckets),
+                    decode_strategy, reorder_buckets(self.bucketing_ctx.decode_buckets),
                     False, kv_caches, decode_available_memory)
 
                 # Not all prompt buckets were captured, but all decode buckets
@@ -1997,7 +2005,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         end_time = time.perf_counter()
         end_mem = HabanaMemoryProfiler.current_device_memory_usage()
         elapsed_time = end_time - start_time
-        compile_time = mid_time - start_time
+        compile_time = mid_time-start_time
         graph_time = end_time - mid_time
         msg = (
             f"Warmup finished in {elapsed_time:.0f} secs, compile:{compile_time:.0f},graph:{graph_time:.0f}"
@@ -2005,6 +2013,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         logger.info(msg)
 
         self.profiler.end()
+        
 
     def finish_measurements(self):
         from neural_compressor.torch.quantization import finalize_calibration
@@ -2443,7 +2452,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                                                        sampling_metadata)
                 htorch.core.mark_step()
                 # Only perform sampling in the driver worker.
-                if not self.is_driver_worker:  #continue
+                if not self.is_driver_worker: #continue
                     continue
 
                 if use_delayed_sampling:  #F
@@ -2494,7 +2503,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                                     len(data.output_token_ids)
                     seq_group_metadata_list, _, _ = self._add_dummy_seq(
                         seq_group_metadata_list, is_prompt=False)
-
+             
                     for seq_group_metadata in seq_group_metadata_list:
                         for data in seq_group_metadata.seq_data.values():
                             max_output_len = sampling_metadata.seq_groups[
@@ -2512,7 +2521,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                                 else:
                                     try_revert_dummy_output_tokens()
                                     return []
-
+              
                     result = self._prepare_decode(seq_group_metadata_list,
                                                   output=output)
                     if self.lora_config:
@@ -2557,8 +2566,8 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                     real_batch_size=real_batch_size,
                     is_prompt=is_prompt)
                 self.profiler.record_counter(self.event_start, counters)
-
-            if num_steps == 1:
+        
+            if num_steps == 1:   
                 if self.return_hidden_states:
                     # we only need to pass hidden states of most recent token
                     assert model_input.sampling_metadata is not None
@@ -2570,11 +2579,11 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                         return [fake_output]
                     else:
                         return []
-
+             
                 return [output] if self.is_driver_worker else []
             else:
                 return []
-
+      
         return output if type(output) is list else [output]
 
     def _delayed_sampler_outputs(self, model_input):
