@@ -2621,10 +2621,16 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
         num_steps: int = 1,
         profile_run_mode=False,
         seqs=None,
+        accepted_token_id: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         warmup_mode = kwargs.get('warmup_mode', False)
         previous_hidden_states = kwargs.get('previous_hidden_states')
+        accepted_token_id_=None
+        if accepted_token_id is not None:
+            accepted_token_id_=accepted_token_id.cpu()
+        #accepted_token_ids_=self.cached_step_accepted_tokens.pop(0).cpu()
+        print(f"================================{accepted_token_id_}=========================")
 
         use_delayed_sampling = VLLM_DELAYED_SAMPLING and not warmup_mode
         assert not (use_delayed_sampling and num_steps != 1), \

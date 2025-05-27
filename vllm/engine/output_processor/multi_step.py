@@ -113,6 +113,11 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             for output in outputs
         ])
         compl_outputs = cast(List[CompletionSequenceGroupOutput], outputs)
+        
+        #print("====================seq_id: ", seq_id)
+        for output in compl_outputs:
+            output.samples[0].parent_seq_id = seq_id
+            #print("====================output.samples[0].parent_seq_id: ", output.samples[0].parent_seq_id)
         assert all([
             seq_id == output.samples[0].parent_seq_id
             for output in compl_outputs
