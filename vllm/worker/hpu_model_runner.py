@@ -1802,7 +1802,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         rank = torch.distributed.get_rank()
 
 
-        if rank==0 and input_tokens[-1][0]==2578:
+        if 0:#rank==0 and input_tokens[-1][0]==2578:
             print(f"{input_tokens=}")
             print(f"{query_lens=}")
             print(f"{input_positions=}")
@@ -2727,7 +2727,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                 htorch.core.mark_step()
 
 
-
+        '''
         # if False: # !self.hpu_opt
         if self.is_driver_worker:
             model_kwargs_broadcast_data = {
@@ -2740,7 +2740,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
             model_kwargs_broadcast_data = broadcast_tensor_dict(src=0)
             input_tokens = model_kwargs_broadcast_data["input_tokens"]
 
-       
+        '''       
         if not model_input.is_first_multi_step:
             if not model_input.is_last_step:
                 # not first or last multi-step
