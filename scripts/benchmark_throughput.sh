@@ -234,6 +234,10 @@ set_bucketing
 gpu_memory_utilization=${VLLM_GPU_MEMORY_UTILIZATION:-"0.9"}
 max_seq_len_to_capture=${VLLM_MAX_SEQ_LEN_TO_CAPTURE:-"8192"}
 
+
+
+echo "benchmark env"
+env
 ${NUMA_CTL} \
 python "$BASH_DIR/../benchmarks/benchmark_throughput.py" \
     --backend vllm \
