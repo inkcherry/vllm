@@ -2843,52 +2843,33 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                         f"{format_bytes(decode_available_memory)} for decode "
                         f"(VLLM_GRAPH_PROMPT_RATIO={prompt_graph_mem_ratio})")
                     logger.info(msg)
+                    #xxx
+                    def reorder_buckets(buckets):
+                        if not self.fast_warmup:
+                            return buckets
+            
+                        # Ensure the order of graph warm-up matches the compilation order.
+                        # Each rank warms up the shapes it is responsible for compiling first,
+                        # before compiling shapes from other ranks.
+                        # This provides a time buffer for RECIPE writes to disk,
+                        # which is helpful for multi-node or NFS-based file systems.
+                        rank_to_data = self.assign_elements(buckets, torch.distributed.get_world_size())
+                        cur_rank = torch.distributed.get_rank()
+                        flattened = [rank_to_data[i][j] for j in range(len(rank_to_data[0])) for i in range(len(rank_to_data))]
+
+                        logger.info(f"Rank {cur_rank} assigned {len(flattened)} buckets: {flattened}")
+
+                        return flattened
                     mem_post_prompt, prompt_batch_seq, prompt_captured_all = \
-                decode_strategy = os.environ.get('VLLM_GRAPH_DECODE_STRATEGY',
-                                                 'max_bs')
-                
-
-                def reorder_buckets(buckets):
-                    if not self.fast_warmup:
-                        return buckets
-        
-                    # Ensure the order of graph warm-up matches the compilation order.
-                    # Each rank warms up the shapes it is responsible for compiling first,
-                    # before compiling shapes from other ranks.
-                    # This provides a time buffer for RECIPE writes to disk,
-                    # which is helpful for multi-node or NFS-based file systems.
-                    rank_to_data = self.assign_elements(buckets, torch.distributed.get_world_size())
-                    cur_rank = torch.distributed.get_rank()
-                    flattened = [rank_to_data[i][j] for j in range(len(rank_to_data[0])) for i in range(len(rank_to_data))]
-
-                    logger.info(f"Rank {cur_rank} assigned {len(flattened)} buckets: {flattened}")
-
-                    return flattened
-
-                mem_post_prompt, prompt_batch_seq, prompt_captured_all = \
-                    self.warmup_graphs(
-                    prompt_strategy, reorder_buckets(self.bucketing_ctx.prompt_buckets),
-                    True, kv_caches, prompt_available_memory)
-                mem_post_decode, decode_batch_seq, decode_captured_all = \
-                    self.warmup_graphs(
-                    decode_strategy, reorder_buckets(self.bucketing_ctx.decode_buckets),
-                    False, kv_caches, decode_available_memory)
-
-                # Not all prompt buckets were captured, but all decode buckets
-                # were captured and we have some free graph-allocated space
-                # left. Let's try to use it for capturing more prompt buckets.
-                if (mem_post_decode + mem_post_prompt < graph_free_mem
-                        and not prompt_captured_all and decode_captured_all):
-                    mem_post_prompt, _, prompt_captured_all = (
                         self.warmup_graphs(
-                        prompt_strategy, self.bucketing_ctx.prompt_buckets,
+                        prompt_strategy, reorder_buckets(self.bucketing_ctx.prompt_buckets),
                         True, kv_caches, prompt_available_memory)
 
                     decode_strategy = os.environ.get(
                         'VLLM_GRAPH_DECODE_STRATEGY', 'max_bs')
                     mem_post_decode, decode_batch_seq, decode_captured_all = \
                         self.warmup_graphs(
-                        decode_strategy, self.bucketing_ctx.decode_buckets,
+                        decode_strategy, reorder_buckets(self.bucketing_ctx.decode_buckets),
                         False, kv_caches, decode_available_memory)
 
                     # Not all prompt buckets were captured, but all decode
@@ -2952,10 +2933,10 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         end_time = time.perf_counter()
         end_mem = HabanaMemoryProfiler.current_device_memory_usage()
         elapsed_time = end_time - start_time
-        compile_time = compile_time - start_time
-        graph_warmup_time = end_time - compile_time
+        compile_elapsed_time = compile_time - start_time
+        graph_warmup_elapsed_time = end_time - compile_time
         msg = (
-            f"Warmup finished in {elapsed_time:.0f} secs, compile:{compile_time:.0f}, graph:{graph_warmup_time:.0f}"
+            f"Warmup finished in {elapsed_time:.0f} secs, compile:{compile_elapsed_time:.0f} secs, graph:{graph_warmup_elapsed_time:.0f} secs\n"
             f"allocated {format_bytes(end_mem - start_mem)} of device memory")
         logger.info(msg)
 
