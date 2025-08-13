@@ -244,7 +244,6 @@ class LlamaAttention(nn.Module):
             attn_output = attn_output * mask.unsqueeze(-1)
 
         output, _ = self.o_proj(attn_output)
-
         return output
 
 
@@ -382,7 +381,6 @@ class LlamaModel(nn.Module):
         self.split_qkv = cache_config.split_qkv
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-
         return self.embed_tokens(input_ids)
 
     def forward(
