@@ -641,7 +641,7 @@ class MoRIIOConnectorScheduler:
             connector_worker: Optional["MoRIIOConnectorWorker"] = None):
 
         params = request.kv_transfer_params
-        logger.info(f"enter alloc :{request.request_id}")
+        # logger.info(f"enter alloc :{request.request_id}")
         if params.get("do_remote_decode"):
             local_block_ids = blocks.get_block_ids()[0]
             self._reqs_need_save[request.request_id] = (request,
@@ -681,10 +681,10 @@ class MoRIIOConnectorScheduler:
                 for tp_index in range(self.tp_size):
                     cur_port = request.kv_transfer_params[
                         'remote_notify_port'] + (self.dp_rank+1)*(tp_index+1)-1
-                    logger.info(f"{request.kv_transfer_params['remote_notify_port']= },")
-                    # cur_port=self.side_notify_port+tp_index
-                    logger.info(f"MoRIIO send notify block for prefill,{params.get("remote_host")=} ,{cur_port = }")
-                    logger.info(f"{tp_index= },{self.dp_rank= },{cur_port= }")
+                    # logger.info(f"{request.kv_transfer_params['remote_notify_port']= },")
+                    # # cur_port=self.side_notify_port+tp_index
+                    # logger.debug(f"MoRIIO send notify block for prefill,{params.get("remote_host")=} ,{cur_port = }")
+                    # logger.info(f"{tp_index= },{self.dp_rank= },{cur_port= }")
 
                     self.send_notify_block(req_id=request.request_id,
                                            int_list=blocks.get_block_ids()[0],
@@ -1748,8 +1748,8 @@ class MoRIIOConnectorWorker:
 
     def _write_blocks_for_req(self, req_id: str, meta: ReqMeta, layer_name,
                               kv_layer):
-        logger.info(f"write block for req {req_id} to remote engine "
-                    f"{meta.remote_engine_id}")
+        # logger.debug(f"write block for req {req_id} to remote engine "
+        #             f"{meta.remote_engine_id}")
         self.schedule_write_blocks(request_id=req_id,
                                    dst_engine_id=meta.remote_engine_id,
                                    local_block_ids=meta.local_block_ids,

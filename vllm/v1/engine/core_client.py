@@ -1133,6 +1133,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
     def get_core_engine_for_request(
             self, request: EngineCoreRequest) -> EngineIdentity:
         # Engines are in rank order.
+        char_sum=sum(ord(c) for c in  request.request_id)
+        request.data_parallel_rank=char_sum%len(self.lb_engines)
+        # logger.info(f"{char_sum=},{len(self.lb_engines)=},{request.request_id=},{request.data_parallel_rank=}")
         if (eng_index := request.data_parallel_rank) is None:
             current_counts = self.lb_engines
             # TODO use P2C alg for larger DP sizes
