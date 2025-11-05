@@ -132,7 +132,9 @@ except ImportError:
 
 class MoRIIOWrapper:
 
-    def __init__(self, moriio_engine=None):
+    def __init__(self, moriio_engine=None,tp_rank=0,dp_rank=0):
+        self.tp_rank=tp_rank
+        self.dp_rank=dp_rank
         self.moriio_engine = moriio_engine
         self.remote_memory_metadata = None
         self.local_memory_registered = False
@@ -323,7 +325,7 @@ class MoRIIOWrapper:
             self.done_remote_allocate_req_dict[req_id] = RemoteAllocInfo(block_ids=int_list,decode_dp_rank=decode_dp_rank)
 
     def _handle_completion_message(self, msg: str):
-        logger.info(f"MoRIIO received block message: {msg}")
+        # logger.info(f"MoRIIO received block message: {msg}")
         with self.lock:
             if get_role() == ROLE.PRODUCER:
                 # logger.debug(f"P received req id {msg} for release")
@@ -634,7 +636,7 @@ class MoRIIOConnectorScheduler:
             "decode_rank": self.dp_rank,
             "type": "remote_blocks"
         }
-        logger.info(f"MoRIIO send notify block for prefill, {data= },{host= },{port= }")
+        # logger.info(f"MoRIIO send notify block for prefill, {data= },{host= },{port= }")
         serialized_data = msgpack.dumps(data)
         self.paths[path].send(serialized_data)
 
@@ -682,10 +684,12 @@ class MoRIIOConnectorScheduler:
                     pass
             else:
                 # Moriio in write mode, do remote prefill(consumer)
-
+                remote_dp_rank=request.kv_transfer_params[
+                        'remote_dp_rank'] 
                 for tp_index in range(self.tp_size):
+                    
                     cur_port = request.kv_transfer_params[
-                        'remote_notify_port'] + (self.dp_rank+1)*(tp_index+1)-1
+                        'remote_notify_port'] + (remote_dp_rank+1)*(tp_index+1)-1
                     # logger.info(f"{request.kv_transfer_params['remote_notify_port']= },")
                     # # cur_port=self.side_notify_port+tp_index
                     # logger.debug(f"MoRIIO send notify block for prefill,{params.get("remote_host")=} ,{cur_port = }")
@@ -905,7 +909,7 @@ class MoRIIOConnectorWorker:
             f"{self.local_ip = },{self._rank = },{self._local_rank = },{self.local_kv_port = },{self.proxy_ip = },{self.proxy_port = },{self.local_ping_port = },{self.proxy_ping_port = }"
         )
         # Agent.
-        self.moriio_wrapper = MoRIIOWrapper()
+        self.moriio_wrapper = MoRIIOWrapper(tp_rank=self.tp_rank,dp_rank=self.dp_rank)
         self.moriio_wrapper.set_moriio_engine(self.moriio_engine)
 
         self.moriio_wrapper.set_backend_type(BackendType.RDMA)
@@ -1070,6 +1074,10 @@ class MoRIIOConnectorWorker:
         REQUEUE_DELAY = 0.01
         while True:
             still_defer: list[WriteTask] = []
+            if self.dp_rank==0:
+                c=0
+            if self.dp_rank==1:
+                b=0
             if self._deferred_tasks:
                 for task in self._deferred_tasks:
                     if self._remote_blocks_ready(task):
@@ -1196,8 +1204,8 @@ class MoRIIOConnectorWorker:
         if request_info.writes_done == self.num_layers:
             #TODO:  wait current req_id transfer complete
             self.moriio_wrapper.waiting_for_transfer_complete()
-            the_remote_port=task.remote_notify_port  + (self.tp_rank+1)*(self.dp_rank+1)-1
-            logger.info(f"send notify for write req {request_id=} {the_remote_port=}")
+            the_remote_port=task.remote_notify_port  + (self.tp_rank+1)*(request_info.decode_dp_rank+1)-1
+            # logger.info(f"send notify for write req {request_id=} {the_remote_port=}")
             self.moriio_wrapper.send_notify(
                 request_id,
                 task.remote_ip,
