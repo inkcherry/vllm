@@ -80,6 +80,7 @@ class LayerTransferPlan:
 class RemoteAllocInfo:
     block_ids: list[int]
     writes_done: int = 0
+    decode_dp_rank: int = 0
     transfer_offset: tuple[list[int], list[int], list[int]] | None = None
 
 
@@ -313,13 +314,13 @@ class MoRIIOWrapper:
     def _handle_structured_message(self, data: dict):
         req_id = data["req_id"]
         int_list = data.get("int_list", [])
+        decode_dp_rank=data.get("decode_rank",0)
         assert len(int_list) > 0, "int_list cannot be empty in remote allocate message"
         msg_type = data.get("type", "unknown")
 
         with self.lock:
             self.done_remote_allocate_req.append(req_id)
-            self.done_remote_allocate_req_dict[req_id] = RemoteAllocInfo(
-                int_list)
+            self.done_remote_allocate_req_dict[req_id] = RemoteAllocInfo(block_ids=int_list,decode_dp_rank=decode_dp_rank)
 
     def _handle_completion_message(self, msg: str):
         logger.info(f"MoRIIO received block message: {msg}")
@@ -403,6 +404,7 @@ class ReqMeta:
     remote_notify_port: int
     remote_engine_id: str
     tp_size: int
+    remote_dp_size: int
 
 
 class MoRIIOConnectorMetadata(KVConnectorMetadata):
@@ -441,6 +443,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             remote_notify_port=kv_transfer_params.get('remote_notify_port'),
             # P workers don't need to receive tp_size from proxy here.
             tp_size=kv_transfer_params.get("tp_size", 1),
+            remote_dp_size=kv_transfer_params.get("remote_dp_size", 8)
         )
         if write_mode:
             self.reqs_to_save[request_id] = _req
@@ -628,8 +631,10 @@ class MoRIIOConnectorScheduler:
         data = {
             "req_id": req_id,
             "int_list": int_list or [],
+            "decode_rank": self.dp_rank,
             "type": "remote_blocks"
         }
+        logger.info(f"MoRIIO send notify block for prefill, {data= },{host= },{port= }")
         serialized_data = msgpack.dumps(data)
         self.paths[path].send(serialized_data)
 
@@ -1207,6 +1212,8 @@ class MoRIIOConnectorWorker:
             # logger.debug("Request %s remote block ids not ready", task.request_id)
             return
         task.event.synchronize()
+        
+        task.dst_engine_id=task.dst_engine_id+"_dp"+str(request_info.decode_dp_rank)
         sessions = self._get_built_session(task.dst_engine_id)
         plan = self._prepare_layer_transfer(task, request_info)
         self._do_layer_write(plan, sessions)
@@ -1331,6 +1338,7 @@ class MoRIIOConnectorWorker:
         port: int,
         remote_tp_size: int,
         expected_engine_id: str,
+        remote_dp_rank:int,
     ) -> dict[int, str]:
         """Do a MoRIIO handshake with a remote instance."""
 
@@ -1348,7 +1356,7 @@ class MoRIIOConnectorWorker:
             engine_id] // remote_tp_size
         tp_ratio = 1
         # p_remote_rank = self.tp_rank // tp_ratio
-        p_remote_rank = (self.tp_rank+1)*(self.dp_rank+1) 
+        p_remote_rank = (self.tp_rank+1)*(remote_dp_rank+1) 
         path = make_zmq_path("tcp", host, port + p_remote_rank)
         logger.info("handeshake Querying metadata on path: %s at remote rank %s", path,
                     p_remote_rank)
@@ -1370,10 +1378,10 @@ class MoRIIOConnectorWorker:
 
             # Ensure engine id matches.
             # pass for write
-            if metadata.engine_id != expected_engine_id:
-                raise RuntimeError(f"Remote MoRIIO agent engine ID mismatch. "
-                                   f"Expected {expected_engine_id},"
-                                   f"received {metadata.engine_id}.")
+            # if metadata.engine_id != expected_engine_id:
+            #     raise RuntimeError(f"Remote MoRIIO agent engine ID mismatch. "
+            #                        f"Expected {expected_engine_id},"
+            #                        f"received {metadata.engine_id}.")
 
             # Register Remote agent.
             # remote_agent_name = self.add_remote_agent(metadata, p_remote_rank,remote_tp_size)
@@ -1384,8 +1392,8 @@ class MoRIIOConnectorWorker:
             remote_agent_name = self.add_remote_agent(metadata, p_remote_rank,
                                                       remote_tp_size)
             logger.info(f"MoRIIO handshake: registered remote agent "
-                        f"{remote_agent_name} for engine ID "
-                        f"{metadata.engine_id}")
+                        f"{remote_agent_name=} for engine ID "
+                        f"{expected_engine_id=},f{path= }")
             if len(self.local_kv_cache_metadata) > 0:
                 logger.warning(
                     f"{len(self.local_kv_cache_metadata) = },maybe you didnt clear this buffer correctly"
@@ -1402,7 +1410,7 @@ class MoRIIOConnectorWorker:
                 assert 0, f"Unexpected frame! {received_frame = }"
             buf = received_frame[1]
             self.layer_name_to_remote_kv_cache_metadata[
-                metadata.engine_id] = pickle.loads(buf)
+                expected_engine_id] = pickle.loads(buf)
 
             setup_agent_time = time.perf_counter()
             logger.debug("MoRIIO handshake: add agent took: %s",
@@ -1422,6 +1430,55 @@ class MoRIIOConnectorWorker:
             host = meta.remote_host
             port = int(meta.remote_handshake_port)
             tp_size = int(meta.tp_size)
+            remote_dp_size = int(meta.remote_dp_size)
+        # TODO: handle failure state of future in the
+        # callback, we want to fail the request in this case.
+        def request_ready(_f: Future[Any], entry=(req_id, meta)):
+            logger.info("MoRIIO handshake done for request %s", req_id)
+            self._ready_requests.put(entry)
+            self.load_ready_flag = True
+            self.write_ready_flags[remote_engine_id] = True
+            
+        if remote_dp_size > 1:
+            # 修复1: 正确初始化future列表
+            fut_list = []
+            
+            for cur_dp_rank in range(remote_dp_size):
+                # 修复2: 为每个DP rank创建独立的engine_id
+                dp_engine_id = f"{remote_engine_id}_dp{cur_dp_rank}"
+                
+                # 提交握手任务
+                future = self._handshake_initiation_executor.submit(
+                    self._moriio_handshake, host, port, tp_size, dp_engine_id, cur_dp_rank
+                )
+                fut_list.append(future)
+                
+                # 为每个future单独设置回调
+                def done_callback(f: Future[dict[int, str]], eid=dp_engine_id):
+                    with self._handshake_lock:
+                        # 修复3: 从handshake_futures中删除对应的engine_id
+                        self._handshake_futures.pop(eid, None)
+                        try:
+                            self._remote_agents[eid] = f.result()
+                        except Exception:
+                            logger.exception("Handshake with %s failed", eid)
+                
+                future.add_done_callback(done_callback)
+                self._handshake_futures[dp_engine_id] = future
+            
+                # 修复4: 使用Future列表而不是单个future
+            # fut = fut_list
+            def wait_all_dp():
+                for future in fut_list:
+                    future.result()  # 等待所有future完成
+                return True
+
+            all_done_future = self._handshake_initiation_executor.submit(wait_all_dp)
+            all_done_future.add_done_callback(request_ready)
+            fut = all_done_future
+        else:
+            remote_engine_id = f"{remote_engine_id}_dp0"
+
             fut = self._handshake_initiation_executor.submit(
                 self._moriio_handshake, host, port, tp_size, remote_engine_id)
 
@@ -1437,14 +1494,9 @@ class MoRIIOConnectorWorker:
             fut.add_done_callback(done_callback)
             self._handshake_futures[remote_engine_id] = fut
 
-        # TODO: handle failure state of future in the
-        # callback, we want to fail the request in this case.
-        def request_ready(_f: Future[Any], entry=(req_id, meta)):
-            self._ready_requests.put(entry)
-            self.load_ready_flag = True
-            self.write_ready_flags[remote_engine_id] = True
 
-        fut.add_done_callback(request_ready)
+
+            fut.add_done_callback(request_ready)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in moriio."""
@@ -1647,15 +1699,19 @@ class MoRIIOConnectorWorker:
         if GLOBAL_MORIIO_MODE == MoRIIOMode.READ:
             return
         remote_engine_id = None
+        
+        
         for req_id, meta in metadata.reqs_to_save.items():
             remote_engine_id = meta.remote_engine_id
+            # we only need to check if dp0 in rank
             remote_engine_id = str(meta.remote_host) + ":" + str(
                 meta.remote_handshake_port)
+        
             meta.remote_engine_id = remote_engine_id
 
             # TODO: mz get_remote_engine_id() for engine_id mapping.
-
-            if remote_engine_id not in self._remote_agents:
+            dp0_remote_engine_id = f"{remote_engine_id}_dp0"
+            if dp0_remote_engine_id not in self._remote_agents:
                 # Initiate handshake with remote engine to exchange metadata.
                 with self._handshake_lock:
                     if remote_engine_id not in self._remote_agents:

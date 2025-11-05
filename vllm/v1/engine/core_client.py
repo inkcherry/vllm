@@ -1076,6 +1076,8 @@ class DPAsyncMPClient(AsyncMPClient):
                     self.engines_running = running
                     if counts is not None:
                         sliced_counts = counts[count_slice]
+                        # logger.info("Engine stats update: wave=%d, running=%s, counts=%s",
+                        #             wave, running, sliced_counts)
                         self.lb_engines = sliced_counts
                         logger.debug("Received counts: %s (%s)", sliced_counts,
                                      count_slice)
@@ -1133,8 +1135,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
     def get_core_engine_for_request(
             self, request: EngineCoreRequest) -> EngineIdentity:
         # Engines are in rank order.
-        char_sum=sum(ord(c) for c in  request.request_id)
-        request.data_parallel_rank=char_sum%len(self.lb_engines)
+        # char_sum=sum(ord(c) for c in  request.request_id)
+        # request.data_parallel_rank=char_sum%len(self.lb_engines)
         # logger.info(f"{char_sum=},{len(self.lb_engines)=},{request.request_id=},{request.data_parallel_rank=}")
         if (eng_index := request.data_parallel_rank) is None:
             current_counts = self.lb_engines
