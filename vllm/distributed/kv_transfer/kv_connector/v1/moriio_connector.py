@@ -116,6 +116,12 @@ def get_moriio_mode() -> MoRIIOMode:
     else:
         return MoRIIOMode.WRITE
 
+
+def get_port_offset(dp_rank: int,tp_rank: int) -> int:
+    #TODO
+    assert (tp_rank + 1) * (dp_rank + 1)<= 8
+    return ((tp_rank + 1) * (dp_rank + 1))% 8 -1
+
 @dataclass
 class MoRIIOConfig:
     local_ip: str
@@ -140,7 +146,8 @@ class MoRIIOConfig:
         base_kv_port = int(kv_transfer_config.kv_port)
         base_ping_port = int(extra_config["local_ping_port"])
         base_notify_port = int(extra_config["notify_port"])
-        port_offset = (tp_rank + 1) * (dp_rank + 1)
+        # port_offset = (tp_rank + 1) * (dp_rank + 1)
+        port_offset=get_port_offset(dp_rank,tp_rank)
         return cls(
             local_ip=get_ip(),
             local_kv_port=base_kv_port + port_offset,
@@ -150,7 +157,7 @@ class MoRIIOConfig:
             proxy_ping_port=int(extra_config["proxy_ping_port"]),
             http_port=int(extra_config['http_port']),
             handshake_port=int(extra_config['handshake_port']),
-            notify_port=base_notify_port + port_offset - 1,
+            notify_port=base_notify_port + port_offset,
             tp_rank=tp_rank,
             dp_rank=dp_rank
         )
@@ -596,6 +603,7 @@ class MoRIIOConnectorScheduler:
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id: EngineId = engine_id
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
+        
         self.side_channel_port = (
             self.vllm_config.kv_transfer_config.kv_connector_extra_config[
                 'handshake_port'],  # envs.VLLM_NIXL_SIDE_CHANNEL_PORT +
@@ -604,6 +612,10 @@ class MoRIIOConnectorScheduler:
         logger.info(
             f"==========> Initializing MoRIIO Scheduler {engine_id = },{self.side_channel_port = }"
         )
+        
+        # logger.info(
+        #     f"==========> Initializing MoRIIO Scheduler {engine_id = }"
+        # )
 
         self.side_notify_port = self.vllm_config.kv_transfer_config.kv_connector_extra_config[
             'notify_port']  # envs.VLLM_NIXL_SIDE_CHANNEL_PORT +
@@ -726,17 +738,14 @@ class MoRIIOConnectorScheduler:
                         'remote_dp_rank'] 
                 for tp_index in range(self.tp_size):
                     
-                    cur_port = request.kv_transfer_params[
-                        'remote_notify_port'] + (remote_dp_rank+1)*(tp_index+1)-1
-                    # logger.info(f"{request.kv_transfer_params['remote_notify_port']= },")
-                    # # cur_port=self.side_notify_port+tp_index
-                    # logger.debug(f"MoRIIO send notify block for prefill,{params.get("remote_host")=} ,{cur_port = }")
-                    # logger.info(f"{tp_index= },{self.dp_rank= },{cur_port= }")
+                    target_port = request.kv_transfer_params[
+                        'remote_notify_port'] + get_port_offset(remote_dp_rank, tp_index)
+                  
 
                     self.send_notify_block(req_id=request.request_id,
                                            int_list=blocks.get_block_ids()[0],
                                            host=params.get("remote_host"),
-                                           port=cur_port)
+                                           port=target_port)
 
             # Only trigger 1 KV transfer per request.
 
@@ -873,35 +882,17 @@ class MoRIIOConnectorWorker:
         
         logger.info(f"MoRIIO Worker init {self.tp_rank = },{self.dp_rank= }"
                     f",{self.is_producer= }")
-        self.local_ip = get_ip()
-        self.local_kv_port = int(self.kv_transfer_config.kv_port)
-        
-        self.local_kv_port = self.local_kv_port + (self.tp_rank+1)*(self.dp_rank+1)
         
         
-        self.proxy_ip = self.kv_transfer_config.kv_connector_extra_config[
-            "proxy_ip"]
-        self.proxy_port = int(
-            self.kv_transfer_config.kv_connector_extra_config["proxy_port"])
-
-        self.local_ping_port = int(
-            self.kv_transfer_config.
-            kv_connector_extra_config["local_ping_port"])
-
-        self.local_ping_port = self.local_ping_port + (self.tp_rank+1)*(self.dp_rank+1)
-
-        self.proxy_ping_port = int(
-            self.kv_transfer_config.
-            kv_connector_extra_config["proxy_ping_port"])
-
-        self.http_port = int(
-            self.kv_transfer_config.kv_connector_extra_config['http_port'])
-        self.handshake_port = int(self.kv_transfer_config.
-                                  kv_connector_extra_config['handshake_port'])
-        self.notify_port = int(
-            self.kv_transfer_config.kv_connector_extra_config['notify_port'])
-        
-        self.notify_port = self.notify_port + (self.tp_rank+1)*(self.dp_rank+1) -1
+        self.local_ip = self.moriio_config.local_ip
+        self.local_kv_port=self.moriio_config.local_kv_port
+        self.proxy_ip = self.moriio_config.proxy_ip
+        self.proxy_port = self.moriio_config.proxy_port
+        self.local_ping_port = self.moriio_config.local_ping_port
+        self.proxy_ping_port =self.moriio_config.proxy_ping_port
+        self.http_port = self.moriio_config.http_port
+        self.handshake_port = self.moriio_config.handshake_port
+        self.notify_port = self.moriio_config.notify_port
         # self.local_metadata_port = int(self.kv_transfer_config.kv_connector_extra_config['metadata_port'])
         '''
         ping: local_ip:local_ping_port -> proxy_ip:proxy_ping_port
@@ -997,7 +988,7 @@ class MoRIIOConnectorWorker:
         #     vllm_config.parallel_config.tensor_parallel_size)
         self.side_channel_port: int = (
             self.moriio_config.handshake_port +
-                (self.dp_rank + 1) * (self.tp_rank + 1)  # 正确的写法
+                get_port_offset(self.dp_rank,self.tp_rank)  # 正确的写法
         )
         #why wuxiao 
         logger.info(f"MoRIIO Worker init {self.tp_rank = },{self.dp_rank= }")
@@ -1253,8 +1244,11 @@ class MoRIIOConnectorWorker:
         if request_info.writes_done == self.num_layers:
             #TODO:  wait current req_id transfer complete
             self.moriio_wrapper.waiting_for_transfer_complete()
-            the_remote_port=task.remote_notify_port  + (self.tp_rank+1)*(request_info.decode_dp_rank+1)-1
+            
+            the_remote_port=task.remote_notify_port  + get_port_offset(self.decode_dp_rank, self.tp_rank)
+            
             # logger.info(f"send notify for write req {request_id=} {the_remote_port=}")
+            
             self.moriio_wrapper.send_notify(
                 request_id,
                 task.remote_ip,
@@ -1413,7 +1407,7 @@ class MoRIIOConnectorWorker:
             engine_id] // remote_tp_size
         tp_ratio = 1
         # p_remote_rank = self.tp_rank // tp_ratio
-        p_remote_rank = (self.tp_rank+1)*(remote_dp_rank+1) 
+        p_remote_rank = get_port_offset(self.dp_rank,self.tp_rank) 
         path = make_zmq_path("tcp", host, port + p_remote_rank)
         logger.info("handeshake Querying metadata on path: %s at remote rank %s", path,
                     p_remote_rank)
