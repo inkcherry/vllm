@@ -47,7 +47,7 @@ def _append_whole_dict_unique(target_list, data_dict):
             return False
     print("!!APPEND!!", data_dict)
     target_list.append(data_dict)
-_list_lock = threading.Lock()
+_list_lock = threading.RLock()
 
 def _listen_for_register(hostname, port):
     context = zmq.Context()
@@ -147,10 +147,10 @@ async def stream_decode_response(session, response, request_id):
     try:
         if response.status == 200:
             async for chunk_bytes in response.content.iter_chunked(1024):
-                if request_id not in yield_chunk:
-                    yield_chunk.add(request_id)
-                else:
-                    logger.info("!!!pass yidle")
+                # if request_id not in yield_chunk:
+                #     yield_chunk.add(request_id)
+                # else:
+                #     logger.info("!!!pass yidle")
                 yield chunk_bytes
         else:
             raise RuntimeError(f"decode response.status != 200, status = {response.status}")
@@ -166,19 +166,19 @@ async def send_request_to_decode(endpoint,req_data,request_id):
         }
         async with session.post(url=endpoint, json=req_data, headers=headers) as response:
             if response.status == 200:
-                async for chunk_bytes in response.content.iter_chunked(10240):
-                        if request_id not in yield_chunk:
-                            # count_print(f"zovlog yield chunk for {request_id}") #128 
-                            yield_chunk.add(request_id)
-                            # b=0
-                            # print(f"!!!{chunk_bytes.decode('utf-8')}")
-                            # try:
-                            #     print("!!!xxx")
-                            #     print(json.loads(chunk_bytes.decode('utf-8'))['choices'][0]['text'])
-                            # except Exception as e:
-                            #     print(f"no text: {e}")
-                        else:
-                            logger.info("!!!pass yidle")
+                async for chunk_bytes in response.content.iter_chunked(1024):
+                        # if request_id not in yield_chunk:
+                        #     # count_print(f"zovlog yield chunk for {request_id}") #128 
+                        #     yield_chunk.add(request_id)
+                        #     # b=0
+                        #     # print(f"!!!{chunk_bytes.decode('utf-8')}")
+                        #     # try:
+                        #     #     print("!!!xxx")
+                        #     #     print(json.loads(chunk_bytes.decode('utf-8'))['choices'][0]['text'])
+                        #     # except Exception as e:
+                        #     #     print(f"no text: {e}")
+                        # else:
+                        #     logger.info("!!!pass yidle")
                             # print("pass yidle")
                         yield chunk_bytes
             else:
@@ -192,13 +192,13 @@ async def handle_request():
     try:
         import time
         
-        st1=time.perf_counter()
+        # st1=time.perf_counter()
         global request_nums
         # extract_ip_port = lambda url: re.search(r'//(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)', url).groups()
         def extract_ip_port_fast(url):
             return IP_PORT_PATTERN.search(url).groups()
         req_data = await request.get_json()
-        st1p5=time.perf_counter()
+        # st1p5=time.perf_counter()
         request_id = str(uuid.uuid4())
 
         # print(f"req_data = {req_data}")
@@ -242,6 +242,7 @@ async def handle_request():
        
         # decode_task= asyncio.create_task(  send_request_to_decode(decode_instance_endpoint['request_address'],req_data,request_id))
         req_data_to_prefill = copy.deepcopy(req_data)
+        # print("send to prefill req_data:",req_data_to_prefill)
         send_prefill_task = asyncio.create_task(send_request_to_prefill(prefill_instance_endpoint['request_address'],req_data_to_prefill,request_id,decode_instance_endpoint,dip,dport))
         # 现在decode可以获取prefill的所有信息了
         ip, port = extract_ip_port_fast(prefill_instance_endpoint['request_address'])
@@ -264,6 +265,7 @@ async def handle_request():
         if 'data_parallel_rank' in req_data:
             req_data['kv_transfer_params']['remote_dp_rank'] = req_data['data_parallel_rank']
             del req_data['data_parallel_rank']
+        # print("send to decode req_data:",req_data)
         decode_request_task = asyncio.create_task(
             start_decode_request(decode_instance_endpoint['request_address'], req_data, request_id)
         )
@@ -273,7 +275,7 @@ async def handle_request():
         session, decode_response = await decode_request_task
         stream_generator = stream_decode_response(session, decode_response, request_id)
         response = await make_response(stream_generator)
-        st4=time.perf_counter()
+        # st4=time.perf_counter()
 
     
 
