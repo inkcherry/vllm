@@ -41,16 +41,16 @@ if TYPE_CHECKING:
 
 from dataclasses import field
 from queue import Empty, Queue
+from enum import Enum
+import logging
 
 Transfer = tuple[int, float]  
 EngineId = str
 ReqId = str
+
 GET_META_MSG = b"get_meta_msg"
 POP_DONE_RECV = b"pop_done_recv"
 OVER = b"OVER"
-from enum import Enum
-
-import logging
 
 logging.getLogger("aiter").disabled = True
 @dataclass
@@ -116,7 +116,45 @@ def get_moriio_mode() -> MoRIIOMode:
     else:
         return MoRIIOMode.WRITE
 
-
+@dataclass
+class MoRIIOConfig:
+    local_ip: str
+    local_kv_port: int
+    proxy_ip: str
+    proxy_port: int
+    local_ping_port: int
+    proxy_ping_port: int
+    http_port: int
+    handshake_port: int
+    notify_port: int
+    tp_rank: int
+    dp_rank: int
+    
+    @classmethod
+    def from_vllm_config(cls, vllm_config: VllmConfig) -> "MoRIIOConfig":
+        """从vllm配置创建MoRIIO配置"""
+        kv_transfer_config = vllm_config.kv_transfer_config
+        extra_config = kv_transfer_config.kv_connector_extra_config
+        tp_rank = get_tensor_model_parallel_rank()
+        dp_rank = vllm_config.parallel_config.data_parallel_rank
+        base_kv_port = int(kv_transfer_config.kv_port)
+        base_ping_port = int(extra_config["local_ping_port"])
+        base_notify_port = int(extra_config["notify_port"])
+        port_offset = (tp_rank + 1) * (dp_rank + 1)
+        return cls(
+            local_ip=get_ip(),
+            local_kv_port=base_kv_port + port_offset,
+            proxy_ip=extra_config["proxy_ip"],
+            proxy_port=int(extra_config["proxy_port"]),
+            local_ping_port=base_ping_port + port_offset,
+            proxy_ping_port=int(extra_config["proxy_ping_port"]),
+            http_port=int(extra_config['http_port']),
+            handshake_port=int(extra_config['handshake_port']),
+            notify_port=base_notify_port + port_offset - 1,
+            tp_rank=tp_rank,
+            dp_rank=dp_rank
+        )
+        
 GLOBAL_MORIIO_MODE = get_moriio_mode()
 
 try:
@@ -812,6 +850,9 @@ class MoRIIOConnectorWorker:
         if not MoRIIO_enabled:
             logger.error("MoRIIO is not available")
             raise RuntimeError("MoRIIO is not available")
+        
+        self.moriio_config = MoRIIOConfig.from_vllm_config(vllm_config)
+        
         logger.info("Initializing MoRIIO wrapper")
         logger.info("Initializing MoRIIO worker %s", engine_id)
 
@@ -827,8 +868,9 @@ class MoRIIOConnectorWorker:
         # mori engine
         self._rank = get_world_group().rank
         self._local_rank = get_world_group().local_rank
-        self.tp_rank = get_tensor_model_parallel_rank()
-        self.dp_rank= vllm_config.parallel_config.data_parallel_rank
+        self.tp_rank = self.moriio_config.tp_rank
+        self.dp_rank= self.moriio_config.dp_rank
+        
         logger.info(f"MoRIIO Worker init {self.tp_rank = },{self.dp_rank= }"
                     f",{self.is_producer= }")
         self.local_ip = get_ip()
@@ -868,35 +910,39 @@ class MoRIIOConnectorWorker:
         metadata: local_ip:local_metadata_port <->
         '''
         self.zmq_context = zmq.Context()
-        self.metadata_address = f"{self.local_ip}:{self.local_ping_port}"
-        self.request_address = f"{self.local_ip}:{self.http_port}"
-        self.ping_address = f"{self.local_ip}:{self.local_ping_port}"
+        self.metadata_address = f"{self.moriio_config.local_ip}:{self.moriio_config.local_ping_port}"
+        self.request_address = f"{self.moriio_config.local_ip}:{self.moriio_config.http_port}"
+        self.ping_address = f"{self.moriio_config.local_ip}:{self.moriio_config.local_ping_port}"
 
         self.moriio_engine = None
         self._handle_request_thread = None
         self._ping_thread = None
-        engine_suffix = str(self.local_ip) + ":" + str(
-            self.handshake_port) + ":tp " + str(self.tp_rank)+":dp " + str(self.dp_rank)
+     
+        
+        engine_suffix = (f"{self.moriio_config.local_ip}:{self.moriio_config.handshake_port}"
+                         f":tp {self.tp_rank}:dp {self.dp_rank}")
         if not self.is_producer:
             self.poller = zmq.Poller()
             self.metadata_socket = self.zmq_context.socket(zmq.ROUTER)
             self.metadata_socket.bind(f"tcp://{self.metadata_address}")
             self.poller.register(self.metadata_socket, zmq.POLLIN)
 
-            logger.info(f"build IOEngine {self.local_ip},{self.local_kv_port}")
+            logger.info("build IOEngine %s:%s", self.moriio_config.local_ip, self.moriio_config.local_kv_port)
+            
             self.moriio_engine = IOEngine(
                 "consumer:" + engine_suffix,
-                IOEngineConfig(self.local_ip, self.local_kv_port))
+                IOEngineConfig(self.moriio_config.local_ip, self.moriio_config.local_kv_port))
+            
             self._handle_request_thread = threading.Thread(
                 target=self.handle_proxy_request, daemon=True)
             self._handle_request_thread.start()
         else:
-            logger.info(f"build IOEngine {self.local_ip},{self.local_kv_port}")
+            logger.info("build IOEngine %s:%s", self.moriio_config.local_ip, self.moriio_config.local_kv_port)
 
             self.moriio_engine = IOEngine(
                 "producer:" + engine_suffix,
-                IOEngineConfig(self.local_ip, self.local_kv_port))
-        if self._rank == 0 and self.proxy_ip != "":
+                IOEngineConfig(self.moriio_config.local_ip, self.moriio_config.local_kv_port))
+        if self._rank == 0 and self.moriio_config.proxy_ip:
             self._ping_thread = threading.Thread(target=self._ping,
                                                  args=(self.zmq_context, ),
                                                  daemon=True)
@@ -910,11 +956,14 @@ class MoRIIOConnectorWorker:
         )
         # Agent.
         self.moriio_wrapper = MoRIIOWrapper(tp_rank=self.tp_rank,dp_rank=self.dp_rank)
+        
         self.moriio_wrapper.set_moriio_engine(self.moriio_engine)
 
         self.moriio_wrapper.set_backend_type(BackendType.RDMA)
 
-        self.moriio_wrapper.notify_port = self.notify_port
+        self.moriio_wrapper.notify_port = self.moriio_config.notify_port
+        
+        
         self.local_kv_cache_metadata = []
         self.local_kv_cache_size = []
         self.layer_name_to_local_kv_cache_metadata: dict[str,
@@ -947,7 +996,7 @@ class MoRIIOConnectorWorker:
         #     vllm_config.parallel_config.data_parallel_rank *
         #     vllm_config.parallel_config.tensor_parallel_size)
         self.side_channel_port: int = (
-            self.handshake_port +
+            self.moriio_config.handshake_port +
                 (self.dp_rank + 1) * (self.tp_rank + 1)  # 正确的写法
         )
         #why wuxiao 
