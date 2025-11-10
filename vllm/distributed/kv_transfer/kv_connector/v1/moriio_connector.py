@@ -1407,7 +1407,7 @@ class MoRIIOConnectorWorker:
             engine_id] // remote_tp_size
         tp_ratio = 1
         # p_remote_rank = self.tp_rank // tp_ratio
-        p_remote_rank = get_port_offset(self.dp_rank,self.tp_rank) 
+        p_remote_rank = get_port_offset(remote_dp_rank,self.tp_rank) 
         path = make_zmq_path("tcp", host, port + p_remote_rank)
         logger.info("handeshake Querying metadata on path: %s at remote rank %s", path,
                     p_remote_rank)
