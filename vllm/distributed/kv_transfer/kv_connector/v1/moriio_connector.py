@@ -1245,7 +1245,7 @@ class MoRIIOConnectorWorker:
             #TODO:  wait current req_id transfer complete
             self.moriio_wrapper.waiting_for_transfer_complete()
             
-            the_remote_port=task.remote_notify_port  + get_port_offset(self.decode_dp_rank, self.tp_rank)
+            the_remote_port=task.remote_notify_port  + get_port_offset(request_info.decode_dp_rank, self.tp_rank)
             
             # logger.info(f"send notify for write req {request_id=} {the_remote_port=}")
             
