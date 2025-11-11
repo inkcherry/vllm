@@ -744,8 +744,8 @@ class MoRIIOConnectorScheduler:
                     pass
             else:
                 # Moriio in write mode, do remote prefill(consumer)
-                remote_dp_rank=request.kv_transfer_params[
-                        'remote_dp_rank'] 
+                remote_dp_rank = request.kv_transfer_params.get('remote_dp_rank', 0)
+
                 for tp_index in range(self.tp_size):
                     
                     target_port = request.kv_transfer_params[
@@ -1397,7 +1397,7 @@ class MoRIIOConnectorWorker:
         port: int,
         remote_tp_size: int,
         expected_engine_id: str,
-        remote_dp_rank:int,
+        remote_dp_rank:int=0,
     ) -> dict[int, str]:
         """Do a MoRIIO handshake with a remote instance."""
 
@@ -1415,10 +1415,9 @@ class MoRIIOConnectorWorker:
             engine_id] // remote_tp_size
         tp_ratio = 1
         # p_remote_rank = self.tp_rank // tp_ratio
-        p_remote_rank = get_port_offset(remote_dp_rank,self.tp_rank) 
-        path = make_zmq_path("tcp", host, port + p_remote_rank)
-        logger.info("handeshake Querying metadata on path: %s at remote rank %s", path,
-                    p_remote_rank)
+        port_offset = get_port_offset(remote_dp_rank,self.tp_rank) 
+        path = make_zmq_path("tcp", host, port + port_offset)
+        logger.info("handeshake Querying metadata on path: %s at remote rank %s", path,)
 
         # Send query for the request.
         with zmq_ctx(zmq.DEALER, path) as sock:
@@ -1499,58 +1498,37 @@ class MoRIIOConnectorWorker:
             self.load_ready_flag = True
             self.write_ready_flags[remote_engine_id] = True
             
-        if remote_dp_size > 1:
-            fut_list = []
+        fut_list = []
+        
+        for cur_dp_rank in range(remote_dp_size):
+            dp_engine_id = f"{remote_engine_id}_dp{cur_dp_rank}"
             
-            for cur_dp_rank in range(remote_dp_size):
-                dp_engine_id = f"{remote_engine_id}_dp{cur_dp_rank}"
-                
-                future = self._handshake_initiation_executor.submit(
-                    self._moriio_handshake, host, port, tp_size, dp_engine_id, cur_dp_rank
-                )
-                fut_list.append(future)
-                
-                def done_callback(f: Future[dict[int, str]], eid=dp_engine_id):
-                    with self._handshake_lock:
-                        self._handshake_futures.pop(eid, None)
-                        try:
-                            self._remote_agents[eid] = f.result()
-                        except Exception:
-                            logger.exception("Handshake with %s failed", eid)
-                
-                future.add_done_callback(done_callback)
-                self._handshake_futures[dp_engine_id] = future
+            future = self._handshake_initiation_executor.submit(
+                self._moriio_handshake, host, port, tp_size, dp_engine_id, cur_dp_rank
+            )
+            fut_list.append(future)
             
-            # fut = fut_list
-            def wait_all_dp():
-                for future in fut_list:
-                    future.result()  
-                return True
-
-            all_done_future = self._handshake_initiation_executor.submit(wait_all_dp)
-            all_done_future.add_done_callback(request_ready)
-            fut = all_done_future
-        else:
-            remote_engine_id = f"{remote_engine_id}_dp0"
-
-            fut = self._handshake_initiation_executor.submit(
-                self._moriio_handshake, host, port, tp_size, remote_engine_id)
-
-            def done_callback(f: Future[dict[int, str]], eid=remote_engine_id):
+            def done_callback(f: Future[dict[int, str]], eid=dp_engine_id):
                 with self._handshake_lock:
-                    del self._handshake_futures[eid]
+                    self._handshake_futures.pop(eid, None)
                     try:
                         self._remote_agents[eid] = f.result()
                     except Exception:
                         logger.exception("Handshake with %s failed", eid)
+            
+            future.add_done_callback(done_callback)
+            self._handshake_futures[dp_engine_id] = future
+        
+        # fut = fut_list
+        def wait_all_dp():
+            for future in fut_list:
+                future.result()  
+            return True
 
-            # if not self.is_producer:
-            fut.add_done_callback(done_callback)
-            self._handshake_futures[remote_engine_id] = fut
+        all_done_future = self._handshake_initiation_executor.submit(wait_all_dp)
+        all_done_future.add_done_callback(request_ready)
+        fut = all_done_future
 
-
-
-            fut.add_done_callback(request_ready)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in moriio."""
