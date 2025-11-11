@@ -117,15 +117,14 @@ def get_moriio_mode() -> MoRIIOMode:
         return MoRIIOMode.WRITE
 
 
-def get_port_offset(dp_rank: int,tp_rank: int, tp_size:int=0) -> int:
+def get_port_offset(dp_rank: int,tp_rank: int, tp_size:int=1) -> int:
     #TODO
     # assert (tp_rank + 1) * (dp_rank + 1)<= 8
     
-    # return (dp_rank)*tp_size+tp_rank
+    return ((dp_rank)*tp_size+tp_rank )%8
            #TP0 TP1 TP2 TP3 TP4 
     # DP0    0   1   2   3   
     # DP1     4   5   6   7    
-    return ((tp_rank + 1) * (dp_rank + 1))% 8 -1
 
 @dataclass
 class MoRIIOConfig:
@@ -140,6 +139,8 @@ class MoRIIOConfig:
     notify_port: int
     tp_rank: int
     dp_rank: int
+    dp_size: int
+    tp_size: int
     
     @classmethod
     def from_vllm_config(cls, vllm_config: VllmConfig) -> "MoRIIOConfig":
@@ -151,6 +152,8 @@ class MoRIIOConfig:
         base_kv_port = int(kv_transfer_config.kv_port)
         base_ping_port = int(extra_config["local_ping_port"])
         base_notify_port = int(extra_config["notify_port"])
+        dp_size=vllm_config.parallel_config.data_parallel_size
+        tp_size=get_tensor_model_parallel_world_size()
         # port_offset = (tp_rank + 1) * (dp_rank + 1)
         port_offset=get_port_offset(dp_rank,tp_rank)
         return cls(
@@ -164,7 +167,9 @@ class MoRIIOConfig:
             handshake_port=int(extra_config['handshake_port']),
             notify_port=base_notify_port + port_offset,
             tp_rank=tp_rank,
-            dp_rank=dp_rank
+            dp_rank=dp_rank,
+            dp_size=dp_size,
+            tp_size=tp_size
         )
         
 GLOBAL_MORIIO_MODE = get_moriio_mode()
@@ -495,7 +500,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             remote_notify_port=kv_transfer_params.get('remote_notify_port'),
             # P workers don't need to receive tp_size from proxy here.
             tp_size=kv_transfer_params.get("tp_size", 1),
-            remote_dp_size=kv_transfer_params.get("remote_dp_size", 8)
+            remote_dp_size=kv_transfer_params.get("remote_dp_size", 1)
         )
         if write_mode:
             self.reqs_to_save[request_id] = _req
@@ -1297,7 +1302,9 @@ class MoRIIOConnectorWorker:
                         "index": str(index),
                         "request_address": http_request_address,
                         "handshake_port": self.handshake_port,
-                        "notify_port": self.notify_port
+                        "notify_port": self.notify_port,
+                        "dp_size":self.moriio_config.dp_size,
+                        "tp_size":self.moriio_config.tp_size,
                     }
 
                     sock.send(msgpack.dumps(data))

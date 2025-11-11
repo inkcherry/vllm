@@ -103,7 +103,7 @@ async def send_request_to_prefill(endpoint,req_data,request_id,p_endpoint,pip,pp
     
     # 本地做prefill,且decode只需要pull模式,所以prefill不需要在这里知晓远程decode任何信息
    
-    req_data_copy['kv_transfer_params'] = {
+    req_data_copy['kv_transfer_params'].update({
         "do_remote_decode": True,
         "do_remote_prefill": False,
         "remote_handshake_port": p_endpoint['handshake_port'],
@@ -112,7 +112,7 @@ async def send_request_to_prefill(endpoint,req_data,request_id,p_endpoint,pip,pp
         "remote_block_ids": None,
         "remote_host":pip ,
         "remote_port": pports,
-    }
+    })
     req_data_copy["stream"] = False
     req_data_copy["max_tokens"] = 1
     if "max_completion_tokens" in req_data_copy:
@@ -243,13 +243,16 @@ async def handle_request():
         # decode_task= asyncio.create_task(  send_request_to_decode(decode_instance_endpoint['request_address'],req_data,request_id))
         req_data_to_prefill = copy.deepcopy(req_data)
         # print("send to prefill req_data:",req_data_to_prefill)
+        req_data_to_prefill['kv_transfer_params']={}
+        req_data_to_prefill['kv_transfer_params']['remote_dp_size']=decode_instance_endpoint['dp_size']
+        req_data_to_prefill['kv_transfer_params']['remote_tp_size']=decode_instance_endpoint['tp_size']
         send_prefill_task = asyncio.create_task(send_request_to_prefill(prefill_instance_endpoint['request_address'],req_data_to_prefill,request_id,decode_instance_endpoint,dip,dport))
         # 现在decode可以获取prefill的所有信息了
         ip, port = extract_ip_port_fast(prefill_instance_endpoint['request_address'])
         
         
 
-        
+     
         req_data['max_tokens'] -= 1
         req_data['data_parallel_rank'] = dp_rank
         req_data['kv_transfer_params'] = {
@@ -262,6 +265,8 @@ async def handle_request():
             "remote_host":ip ,
             "remote_port": port,
         }
+        req_data['kv_transfer_params']['remote_dp_size'] = prefill_instance_endpoint['dp_size']
+        req_data['kv_transfer_params']['remote_tp_size'] = prefill_instance_endpoint['tp_size']
         if 'data_parallel_rank' in req_data:
             req_data['kv_transfer_params']['remote_dp_rank'] = req_data['data_parallel_rank']
             del req_data['data_parallel_rank']
