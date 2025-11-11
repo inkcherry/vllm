@@ -1684,32 +1684,6 @@ class MoRIIOConnectorWorker:
         ready_event.wait()  # Wait for listener ZMQ socket to be ready.
         self.moriio_wrapper.async_wait_reqid(self.kv_caches)
 
-    # def add_remote_agent(self,
-    #                      moriio_agent_meta: MoRIIOAgentMetadata,
-    #                      remote_tp_rank: int = 0,
-    #                      remote_tp_size: int = 1) -> str:
-
-    #     engine_id = moriio_agent_meta.engine_id
-    #     # TODO re-evaluate refreshing for scaling/recovery
-    #     if remote_tp_rank in self._remote_agents.get(engine_id, {}):
-    #         return self._remote_agents[engine_id][remote_tp_rank]
-
-    #     if engine_id not in self._tp_size:
-    #         self._tp_size[engine_id] = remote_tp_size
-    #     else:
-    #         assert self._tp_size[engine_id] == remote_tp_size
-    #     # We may eventually enable this after asserting equality in cache
-    #     # layout and close outputs.
-    #     if moriio_agent_meta.attn_backend_name != self.backend_name:
-    #         logger.info(
-    #             f"!!!!!! Remote MoRIIO agent {engine_id} attention backend "
-    #             f"'{moriio_agent_meta.attn_backend_name}' does not match "
-    #             f"local backend '{self.backend_name}'.")
-
-    #     remote_agent_name = "test"
-
-    #     return remote_agent_name
-
     def get_finished(self) -> tuple[set[str], set[str]]:
         """
         Get requests that are done sending or recving on this specific worker.
