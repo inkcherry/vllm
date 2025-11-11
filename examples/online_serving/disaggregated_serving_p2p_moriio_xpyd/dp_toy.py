@@ -215,26 +215,16 @@ async def handle_request():
             index=index_list[request_nums % len(index_list)]
             prefill_instance_endpoint = prefill_instances[index[0]]
             decode_instance_endpoint = decode_instances[index[1]]
-            # print(f"P:{index[0]},D:{index[1]}")
         
         else:
-            # assert False, f"prefill_instances or decode_instances not ready,"
             pid=request_nums % len(prefill_instances)
             did=request_nums % len(decode_instances)
             prefill_instance_endpoint = prefill_instances[pid]
             decode_instance_endpoint = decode_instances[did]
-            # print(f"P:{pid},D:{did}")
 
-        # print(f"{prefill_instances=},{decode_instances=}")
-        # print(f"******{request_id}******,******{prefill_instance_endpoint=}, {decode_instance_endpoint=}, {request_nums=}")
         dip,dport= extract_ip_port_fast(decode_instance_endpoint['request_address'])
         # preq_data = copy.deepcopy(req_data)
         ip, port = extract_ip_port_fast(prefill_instance_endpoint['request_address'])
-        # response_json['kv_transfer_params']["do_remote_decode"] = False
-        # response_json['kv_transfer_params']["do_remote_prefill"] = True
-        # response_json['kv_transfer_params']["remote_host"] = ip
-        # response_json['kv_transfer_params']["remote_port"] = port # 似乎没用
-        # response_json['kv_transfer_params']["remote_handshake_port"] = prefill_instance_endpoint['handshake_port']
 
     
 
@@ -249,10 +239,6 @@ async def handle_request():
         send_prefill_task = asyncio.create_task(send_request_to_prefill(prefill_instance_endpoint['request_address'],req_data_to_prefill,request_id,decode_instance_endpoint,dip,dport))
         # 现在decode可以获取prefill的所有信息了
         ip, port = extract_ip_port_fast(prefill_instance_endpoint['request_address'])
-        
-        
-
-     
         req_data['max_tokens'] -= 1
         req_data['data_parallel_rank'] = dp_rank
         req_data['kv_transfer_params'] = {

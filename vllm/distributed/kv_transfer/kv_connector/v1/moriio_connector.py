@@ -1124,10 +1124,6 @@ class MoRIIOConnectorWorker:
         REQUEUE_DELAY = 0.01
         while True:
             still_defer: list[WriteTask] = []
-            if self.dp_rank==0:
-                c=0
-            if self.dp_rank==1:
-                b=0
             if self._deferred_tasks:
                 for task in self._deferred_tasks:
                     if self._remote_blocks_ready(task):
@@ -1452,8 +1448,9 @@ class MoRIIOConnectorWorker:
             self.moriio_wrapper.remote_engine_ip = host
             remote_agent_name = self.moriio_wrapper.register_remote_engine(
                 metadata.agent_metadata)
-            remote_agent_name = self.add_remote_agent(metadata, p_remote_rank,
-                                                      remote_tp_size)
+            remote_agent_name=EngineDesc.unpack(metadata.agent_metadata).key
+            # remote_agent_name = self.cfv(metadata, p_remote_rank,
+            #                                           remote_tp_size)
             logger.info(f"MoRIIO handshake: registered remote agent "
                         f"{remote_agent_name=} for engine ID "
                         f"{expected_engine_id=},f{path= }")
@@ -1480,7 +1477,7 @@ class MoRIIOConnectorWorker:
                          setup_agent_time - got_metadata_time)
 
         # Remote rank -> agent name.
-        return {p_remote_rank: remote_agent_name}
+        return {remote_agent_name}
 
     def _background_moriio_handshake(self, req_id: str,
                                      remote_engine_id: EngineId,
@@ -1503,23 +1500,18 @@ class MoRIIOConnectorWorker:
             self.write_ready_flags[remote_engine_id] = True
             
         if remote_dp_size > 1:
-            # 修复1: 正确初始化future列表
             fut_list = []
             
             for cur_dp_rank in range(remote_dp_size):
-                # 修复2: 为每个DP rank创建独立的engine_id
                 dp_engine_id = f"{remote_engine_id}_dp{cur_dp_rank}"
                 
-                # 提交握手任务
                 future = self._handshake_initiation_executor.submit(
                     self._moriio_handshake, host, port, tp_size, dp_engine_id, cur_dp_rank
                 )
                 fut_list.append(future)
                 
-                # 为每个future单独设置回调
                 def done_callback(f: Future[dict[int, str]], eid=dp_engine_id):
                     with self._handshake_lock:
-                        # 修复3: 从handshake_futures中删除对应的engine_id
                         self._handshake_futures.pop(eid, None)
                         try:
                             self._remote_agents[eid] = f.result()
@@ -1529,11 +1521,10 @@ class MoRIIOConnectorWorker:
                 future.add_done_callback(done_callback)
                 self._handshake_futures[dp_engine_id] = future
             
-                # 修复4: 使用Future列表而不是单个future
             # fut = fut_list
             def wait_all_dp():
                 for future in fut_list:
-                    future.result()  # 等待所有future完成
+                    future.result()  
                 return True
 
             all_done_future = self._handshake_initiation_executor.submit(wait_all_dp)
@@ -1693,31 +1684,31 @@ class MoRIIOConnectorWorker:
         ready_event.wait()  # Wait for listener ZMQ socket to be ready.
         self.moriio_wrapper.async_wait_reqid(self.kv_caches)
 
-    def add_remote_agent(self,
-                         moriio_agent_meta: MoRIIOAgentMetadata,
-                         remote_tp_rank: int = 0,
-                         remote_tp_size: int = 1) -> str:
+    # def add_remote_agent(self,
+    #                      moriio_agent_meta: MoRIIOAgentMetadata,
+    #                      remote_tp_rank: int = 0,
+    #                      remote_tp_size: int = 1) -> str:
 
-        engine_id = moriio_agent_meta.engine_id
-        # TODO re-evaluate refreshing for scaling/recovery
-        if remote_tp_rank in self._remote_agents.get(engine_id, {}):
-            return self._remote_agents[engine_id][remote_tp_rank]
+    #     engine_id = moriio_agent_meta.engine_id
+    #     # TODO re-evaluate refreshing for scaling/recovery
+    #     if remote_tp_rank in self._remote_agents.get(engine_id, {}):
+    #         return self._remote_agents[engine_id][remote_tp_rank]
 
-        if engine_id not in self._tp_size:
-            self._tp_size[engine_id] = remote_tp_size
-        else:
-            assert self._tp_size[engine_id] == remote_tp_size
-        # We may eventually enable this after asserting equality in cache
-        # layout and close outputs.
-        if moriio_agent_meta.attn_backend_name != self.backend_name:
-            logger.info(
-                f"!!!!!! Remote MoRIIO agent {engine_id} attention backend "
-                f"'{moriio_agent_meta.attn_backend_name}' does not match "
-                f"local backend '{self.backend_name}'.")
+    #     if engine_id not in self._tp_size:
+    #         self._tp_size[engine_id] = remote_tp_size
+    #     else:
+    #         assert self._tp_size[engine_id] == remote_tp_size
+    #     # We may eventually enable this after asserting equality in cache
+    #     # layout and close outputs.
+    #     if moriio_agent_meta.attn_backend_name != self.backend_name:
+    #         logger.info(
+    #             f"!!!!!! Remote MoRIIO agent {engine_id} attention backend "
+    #             f"'{moriio_agent_meta.attn_backend_name}' does not match "
+    #             f"local backend '{self.backend_name}'.")
 
-        remote_agent_name = "test"
+    #     remote_agent_name = "test"
 
-        return remote_agent_name
+    #     return remote_agent_name
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """
