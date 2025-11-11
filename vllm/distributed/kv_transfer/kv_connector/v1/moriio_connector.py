@@ -117,9 +117,14 @@ def get_moriio_mode() -> MoRIIOMode:
         return MoRIIOMode.WRITE
 
 
-def get_port_offset(dp_rank: int,tp_rank: int) -> int:
+def get_port_offset(dp_rank: int,tp_rank: int, tp_size:int=0) -> int:
     #TODO
-    assert (tp_rank + 1) * (dp_rank + 1)<= 8
+    # assert (tp_rank + 1) * (dp_rank + 1)<= 8
+    
+    # return (dp_rank)*tp_size+tp_rank
+           #TP0 TP1 TP2 TP3 TP4 
+    # DP0    0   1   2   3   
+    # DP1     4   5   6   7    
     return ((tp_rank + 1) * (dp_rank + 1))% 8 -1
 
 @dataclass
