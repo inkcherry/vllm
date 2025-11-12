@@ -998,7 +998,7 @@ class MoRIIOConnectorWorker:
         #     vllm_config.parallel_config.tensor_parallel_size)
         self.side_channel_port: int = (
             self.moriio_config.handshake_port +
-                get_port_offset(self.dp_rank,self.tp_rank)  # 正确的写法
+                get_port_offset(self.dp_rank,self.tp_rank)  
         )
         #why wuxiao 
         logger.info(f"MoRIIO Worker init {self.tp_rank = },{self.dp_rank= }")
@@ -1120,8 +1120,6 @@ class MoRIIOConnectorWorker:
         return task.request_id in self.moriio_wrapper.done_remote_allocate_req_dict
 
     def _write_worker_loop(self):
-        SLEEP_MIN = 0.001
-        REQUEUE_DELAY = 0.01
         while True:
             still_defer: list[WriteTask] = []
             if self._deferred_tasks:
@@ -1747,12 +1745,10 @@ class MoRIIOConnectorWorker:
 
         wait_handshage_readd_req = False
         for req_id, meta in metadata.reqs_to_recv.items():
-            remote_engine_id = meta.remote_engine_id
-            # logger.debug(
-            #     "start_load_kv for request %s from remote engine %s. "
-            #     "Num local_block_ids: %s. Num remote_block_ids: %s. ", req_id,
-            #     remote_engine_id, len(meta.local_block_ids),
-            #     len(meta.remote_block_ids))
+            remote_engine_id = str(meta.remote_host) + ":" + str(
+                meta.remote_handshake_port)
+           
+           
             if remote_engine_id not in self._remote_agents:
                 # Initiate handshake with remote engine to exchange metadata.
                 with self._handshake_lock:
