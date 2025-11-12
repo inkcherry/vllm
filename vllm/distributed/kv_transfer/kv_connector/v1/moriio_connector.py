@@ -204,6 +204,7 @@ class MoRIIOWrapper:
         self.sessions = []
         self.kv_caches = None
         self.paths = {}
+        
 
     def set_moriio_engine(self, moriio_engine):
         assert moriio_engine is not None, "You Cannot pass None engine to MoRIIOWrapper!"
@@ -251,20 +252,8 @@ class MoRIIOWrapper:
             local_offset, remote_offset, transfer_size_byte,
             self.moriio_engine.allocate_transfer_uid())
 
-        self.transfer_status.append(transfer_status)
-
-    def read_remote_data_single(self,
-                                transfer_size_byte,
-                                local_offset=0,
-                                remote_offset=0,
-                                session=None):
-        assert self.local_memory_registered, "You have not register local memory data!"
-
-        transfer_status = session.read(
-            local_offset, remote_offset, transfer_size_byte,
-            self.moriio_engine.allocate_transfer_uid())
-
-        self.transfer_status.append(transfer_status)
+        # self.transfer_status.append(transfer_status)
+        return transfer_status
 
     def write_remote_data(self,
                           transfer_size_byte,
@@ -1027,7 +1016,7 @@ class MoRIIOConnectorWorker:
         self._registered_descs: list[Any] = []
         # In progress transfers.
         # [req_id -> list[handle]]
-        self._recving_transfers = defaultdict[ReqId, list[Transfer]](list)
+        self._recving_transfers:defaultdict[ReqId, list]={}
         # Track the expiration time of requests that are waiting to be sent.
         self._reqs_to_send: dict[ReqId, float] = {}
 
@@ -1625,8 +1614,9 @@ class MoRIIOConnectorWorker:
         if self.is_producer:
             done_sending = self.moriio_wrapper.pop_finished_req_ids()
             if GLOBAL_MORIIO_MODE == MoRIIOMode.WRITE:
-
                 done_recving = set()
+            else:
+                done_recving=self._pop_done_transfers()
         else:
             if GLOBAL_MORIIO_MODE == MoRIIOMode.WRITE:
                 self.moriio_wrapper.async_wait_reqid()
@@ -1643,8 +1633,29 @@ class MoRIIOConnectorWorker:
         """
         pass
 
-    def _pop_done_transfers(self, done_req_ids) -> set[str]:
+    def _pop_done_transfers(self) -> set[str]:
 
+        done_req_ids: set[str] = set()
+        for req_id, status_list in self._recving_transfers.items():
+            if status_list[-1].Succeeded():
+                done_req_ids.add(req_id)
+                del self._recving_transfers[req_id]
+        return done_req_ids
+        # for req_id, handles in list(transfers.items()):
+        #     in_progress = False
+        #     for handle, _xfer_stime in handles:
+        #         xfer_state = self.nixl_wrapper.check_xfer_state(handle)
+        #         if xfer_state == "DONE":
+        #             self.nixl_wrapper.release_xfer_handle(handle)
+        #         elif xfer_state == "PROC":
+        #             in_progress = True
+        #             continue
+        #         else:
+        #             raise RuntimeError("Transfer failed with state %s",
+        #                                xfer_state)
+        #     if not in_progress:
+        #         done_req_ids.add(req_id)
+        #         del transfers[req_id]
         return done_req_ids
 
     def save_kv_layer(self, metadata: MoRIIOConnectorMetadata, layer_name: str,
@@ -1912,8 +1923,9 @@ class MoRIIOConnectorWorker:
 
         for layer_name in self.layer_name_to_local_kv_cache_metadata.keys():
             sess_idx = list(self.layer_name_to_local_kv_cache_metadata.keys()).index(layer_name)
-            self.moriio_wrapper.read_remote_data(c, a, b, sessions[sess_idx])
-            self.moriio_wrapper.waiting_for_transfer_complete()
+            transfer_status=self.moriio_wrapper.read_remote_data(c, a, b, sessions[sess_idx])
+            self._recving_transfers[request_id].append(transfer_status)
+            # self.moriio_wrapper.waiting_for_transfer_complete()
 
 @contextlib.contextmanager
 def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
