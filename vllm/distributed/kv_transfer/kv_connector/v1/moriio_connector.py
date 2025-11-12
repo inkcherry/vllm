@@ -1172,45 +1172,14 @@ class MoRIIOConnectorWorker:
         local_block_ids = task.local_block_ids
         remote_block_ids = request_info.block_ids
 
-        is_mla = (len(self.kv_cache_shape) == 3)
-        sess_idx = list(self.layer_name_to_local_kv_cache_metadata.keys()).index(layer_name)
-        sz = self.kv_caches[layer_name].element_size()
-        stride = self.kv_caches[layer_name].stride()
-        if is_mla:
-            blknum, blksize, hs = self.kv_cache_shape
-            hn = 1
-            block_stride = stride[0]
-            ktov_stride = None
-        else:
-            _, blknum, blksize, hn, hs = self.kv_cache_shape
-            ktov_stride = stride[0]
-            block_stride = stride[1]
-        transfer_size_byte = blksize * hn * hs * sz
-        
         if request_info.transfer_offset is None:
-            per_block = 1 if is_mla else 2
-            total = len(local_block_ids) * per_block
-            offset_local = [0] * total
-            offset_remote = [0] * total
-            transfer_sizes = [transfer_size_byte] * total
-            w = 0
-            for i, lb in enumerate(local_block_ids):
-                rb = remote_block_ids[i]
-                # K
-                offset_local[w] = sz * (lb * block_stride)
-                offset_remote[w] = sz * (rb * block_stride)
-                w += 1
-                if not is_mla:
-                    # V
-                    offset_local[w] = sz * (1 * ktov_stride +
-                                            lb * block_stride)
-                    offset_remote[w] = sz * (1 * ktov_stride +
-                                                rb * block_stride)
-                    w += 1
-         
-            merged_l, merged_r, merged_s = self.merge_contiguous_blocks_fast_v2(
-                offset_local, offset_remote, transfer_sizes, assume_sorted=True)
-            request_info.transfer_offset = (merged_l, merged_r, merged_s)
+            offs = self._compute_block_transfer_offsets(
+                layer_name, local_block_ids, remote_block_ids
+            )
+            request_info.transfer_offset = (offs[0], offs[1], offs[2])
+        # is_mla = (len(self.kv_cache_shape) == 3)
+        sess_idx = list(self.layer_name_to_local_kv_cache_metadata.keys()).index(layer_name)
+      
 
         a, b, c = request_info.transfer_offset
         return LayerTransferPlan(
