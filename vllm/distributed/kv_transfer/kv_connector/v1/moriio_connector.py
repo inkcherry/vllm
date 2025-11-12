@@ -1434,22 +1434,11 @@ class MoRIIOConnectorWorker:
             logger.info("MoRIIO handshake: get metadata took: %s",
                          got_metadata_time - start_time)
 
-            # Ensure engine id matches.
-            # pass for write
-            # if metadata.engine_id != expected_engine_id:
-            #     raise RuntimeError(f"Remote MoRIIO agent engine ID mismatch. "
-            #                        f"Expected {expected_engine_id},"
-            #                        f"received {metadata.engine_id}.")
-
-            # Register Remote agent.
-            # remote_agent_name = self.add_remote_agent(metadata, p_remote_rank,remote_tp_size)
-            # self.moriio_wrapper.remote_handshake_port = port + p_remote_rank
             self.moriio_wrapper.remote_engine_ip = host
             remote_agent_name = self.moriio_wrapper.register_remote_engine(
                 metadata.agent_metadata)
             remote_agent_name=EngineDesc.unpack(metadata.agent_metadata).key
-            # remote_agent_name = self.cfv(metadata, p_remote_rank,
-            #                                           remote_tp_size)
+         
             logger.info(f"MoRIIO handshake: registered remote agent "
                         f"{remote_agent_name=} for engine ID "
                         f"{expected_engine_id=},f{path= }")
