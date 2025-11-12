@@ -1641,22 +1641,7 @@ class MoRIIOConnectorWorker:
                 done_req_ids.add(req_id)
                 del self._recving_transfers[req_id]
         return done_req_ids
-        # for req_id, handles in list(transfers.items()):
-        #     in_progress = False
-        #     for handle, _xfer_stime in handles:
-        #         xfer_state = self.nixl_wrapper.check_xfer_state(handle)
-        #         if xfer_state == "DONE":
-        #             self.nixl_wrapper.release_xfer_handle(handle)
-        #         elif xfer_state == "PROC":
-        #             in_progress = True
-        #             continue
-        #         else:
-        #             raise RuntimeError("Transfer failed with state %s",
-        #                                xfer_state)
-        #     if not in_progress:
-        #         done_req_ids.add(req_id)
-        #         del transfers[req_id]
-        return done_req_ids
+
 
     def save_kv_layer(self, metadata: MoRIIOConnectorMetadata, layer_name: str,
                       kv_layer: torch.Tensor,
