@@ -1744,12 +1744,14 @@ class MoRIIOConnectorWorker:
             return
 
         wait_handshage_readd_req = False
+        remote_engine_id = None
+
         for req_id, meta in metadata.reqs_to_recv.items():
             remote_engine_id = str(meta.remote_host) + ":" + str(
                 meta.remote_handshake_port)
-           
-           
-            if remote_engine_id not in self._remote_agents:
+            meta.remote_engine_id = remote_engine_id
+            dp0_remote_engine_id = f"{remote_engine_id}_dp0"
+            if dp0_remote_engine_id not in self._remote_agents:
                 # Initiate handshake with remote engine to exchange metadata.
                 with self._handshake_lock:
                     if remote_engine_id not in self._remote_agents:
@@ -1895,7 +1897,7 @@ class MoRIIOConnectorWorker:
 
         if GLOBAL_MORIIO_MODE == MoRIIOMode.WRITE:
             return
-
+        dst_engine_id+="_dp0"
         sessions = self._get_built_session(dst_engine_id)
         is_mla = (len(self.kv_cache_shape) == 3)
 
