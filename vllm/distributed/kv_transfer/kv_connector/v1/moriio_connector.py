@@ -118,13 +118,8 @@ def get_moriio_mode() -> MoRIIOMode:
 
 
 def get_port_offset(dp_rank: int,tp_rank: int, tp_size:int=1) -> int:
-    #TODO
-    # assert (tp_rank + 1) * (dp_rank + 1)<= 8
-    
-    return ((dp_rank)*tp_size+tp_rank )%8
-           #TP0 TP1 TP2 TP3 TP4 
-    # DP0    0   1   2   3   
-    # DP1     4   5   6   7    
+    RANK_PER_NODE=8
+    return ((dp_rank)*tp_size+tp_rank )%RANK_PER_NODE
 
 @dataclass
 class MoRIIOConfig:
@@ -1891,6 +1886,48 @@ class MoRIIOConnectorWorker:
 
         return merged_local, merged_remote, merged_sizes
 
+    def _compute_block_transfer_offsets(
+        self,
+        layer_name: str,
+        local_block_ids: list[int],
+        remote_block_ids: list[int],
+    )   -> tuple[list[int], list[int], list[int]]:
+        is_mla = (len(self.kv_cache_shape) == 3)
+        stride = self.kv_caches[layer_name].stride()
+        sz = self.kv_caches[layer_name].element_size()
+        if is_mla:
+            blknum, blksize, hs = self.kv_cache_shape
+            hn = 1
+            block_stride = stride[0]
+            ktov_stride = None
+        else:
+            _, blknum, blksize, hn, hs = self.kv_cache_shape
+            ktov_stride = stride[0]
+            block_stride = stride[1]
+
+        transfer_size_byte = blksize * hn * hs * sz
+        per_block = 1 if is_mla else 2
+        total = len(local_block_ids) * per_block
+        offset_local = [0] * total
+        offset_remote = [0] * total
+        sizes = [transfer_size_byte] * total
+
+        w = 0
+        for i, lb in enumerate(local_block_ids):
+            rb = remote_block_ids[i]
+            # K
+            offset_local[w] = sz * (lb * block_stride)
+            offset_remote[w] = sz * (rb * block_stride)
+            w += 1
+            if not is_mla:
+                # V
+                offset_local[w] = sz * (1 * ktov_stride + lb * block_stride)
+                offset_remote[w] = sz * (1 * ktov_stride + rb * block_stride)
+                w += 1
+
+        merged_l, merged_r, merged_s = self.merge_contiguous_blocks_fast_v2(
+            offset_local, offset_remote, sizes, assume_sorted=True)
+        return merged_l, merged_r, merged_s
     def _read_blocks(self, local_block_ids: list[int],
                      remote_block_ids: list[int], dst_engine_id: str,
                      request_id: str):
@@ -1899,64 +1936,15 @@ class MoRIIOConnectorWorker:
             return
         dst_engine_id+="_dp0"
         sessions = self._get_built_session(dst_engine_id)
-        is_mla = (len(self.kv_cache_shape) == 3)
+        
+        first_layer = list(self.layer_name_to_local_kv_cache_metadata.keys())[0]
+        offs = self._compute_block_transfer_offsets(first_layer, local_block_ids, remote_block_ids)
+        a, b, c = offs[0], offs[1], offs[2]
 
-        a, b, c = [], [], []
-        for layer_name, local_kv_cache_metadata in self.layer_name_to_local_kv_cache_metadata.items(
-        ):
-
-            if self._is_first_layer(layer_name):
-                stride = self.kv_caches[layer_name].stride()
-                if is_mla:
-                    blknum, blksize, hs = self.kv_cache_shape
-                    hn = 1
-                    block_stride = stride[0]
-                    ktov_stride = None
-                else:
-                    _, blknum, blksize, hn, hs = self.kv_cache_shape
-                    ktov_stride = stride[0]
-                    block_stride = stride[1]
-                sz = self.kv_caches[layer_name].element_size()
-                transfer_size_byte = blksize * hn * hs * sz
-                per_block = 1 if is_mla else 2
-                total = len(local_block_ids) * per_block
-                offset_local = [0] * total
-                offset_remote = [0] * total
-                transfer_sizes = [transfer_size_byte] * total
-                w = 0
-                for i, lb in enumerate(local_block_ids):
-                    rb = remote_block_ids[i]
-                    # K
-                    offset_local[w] = sz * (lb * block_stride)
-                    offset_remote[w] = sz * (rb * block_stride)
-                    w += 1
-                    if not is_mla:
-                        # V
-                        offset_local[w] = sz * (1 * ktov_stride +
-                                                lb * block_stride)
-                        offset_remote[w] = sz * (1 * ktov_stride +
-                                                 rb * block_stride)
-                        w += 1
-                    a, b, c = self.merge_contiguous_blocks_fast_v2(
-                        offset_local,
-                        offset_remote,
-                        transfer_sizes,
-                        assume_sorted=True)
-
-            sess_idx = list(
-                self.layer_name_to_local_kv_cache_metadata.keys()).index(
-                    layer_name)
-            use_batch = True
-            if use_batch:
-                self.moriio_wrapper.read_remote_data(c, a, b,
-                                                     sessions[sess_idx])
-            else:
-                for i in range(len(a)):
-                    self.moriio_wrapper.read_remote_data([c[i]], [a[i]],
-                                                         [b[i]],
-                                                         sessions[sess_idx])
+        for layer_name in self.layer_name_to_local_kv_cache_metadata.keys():
+            sess_idx = list(self.layer_name_to_local_kv_cache_metadata.keys()).index(layer_name)
+            self.moriio_wrapper.read_remote_data(c, a, b, sessions[sess_idx])
             self.moriio_wrapper.waiting_for_transfer_complete()
-
 
 @contextlib.contextmanager
 def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
