@@ -80,6 +80,7 @@ class WriteTask:
 
 @dataclass
 class LayerTransferPlan:
+    """Plan for transferring a single layer."""
     request_id: str
     layer_name: str
     sess_idx: int
@@ -90,6 +91,7 @@ class LayerTransferPlan:
     
 @dataclass
 class RemoteAllocInfo:
+    """Information about remote block allocation."""
     block_ids: list[int]
     writes_done: int = 0
     decode_dp_rank: int = 0
@@ -448,6 +450,7 @@ class MoRIIOAgentMetadata(
 
 @dataclass
 class ReqMeta:
+    """Metadata for a single request."""
     local_block_ids: list[int]
     remote_block_ids: list[int]
     remote_host: str
