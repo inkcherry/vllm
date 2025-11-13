@@ -973,21 +973,12 @@ class MoRIIOConnectorWorker:
         # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
         self._remote_agents: dict[EngineId, dict[int, str]] = defaultdict(dict)
 
-        # MoRIIO handshake port.
-        # NOTE(rob): Within a DP group, each DP rank gets its own
-        # base port (which is sent in the KVTransferParams).
-        # Each TP rank listens/queries on the base_port + tp_rank.
-        # self.side_channel_port: int = (
-        #     envs.VLLM_NIXL_SIDE_CHANNEL_PORT +
-        #     vllm_config.parallel_config.data_parallel_rank *
-        #     vllm_config.parallel_config.tensor_parallel_size)
         self.side_channel_port: int = (
             self.moriio_config.handshake_port +
                 get_port_offset(self.dp_rank,self.tp_rank)  
         )
         logger.info(f"MoRIIO Worker init {self.tp_rank = },{self.dp_rank= }")
         logger.info(f"MoRIIO side channel_port port: {self.side_channel_port}, han")
-        # Metadata.
         self.engine_id: EngineId = engine_id
 
         self.world_size = get_tensor_model_parallel_world_size()
@@ -1005,15 +996,11 @@ class MoRIIOConnectorWorker:
         self.num_regions = 0
         self.num_layers = 0
 
-        # moriio_prepped_dlist_handle.
-        self.src_xfer_side_handle: int = 0
-        # Map of engine_id -> moriio_prepped_dlist_handle (int)].
-        self.dst_xfer_side_handles: dict[EngineId, int] = {}
+ 
 
         # Map of engine_id -> num_blocks. All ranks in the same deployment will
         # have the same number of blocks.
         self.dst_num_blocks: dict[EngineId, int] = {}
-        self._registered_descs: list[Any] = []
         # In progress transfers.
         # [req_id -> list[handle]]
         self._recving_transfers:defaultdict[ReqId, list]={}
@@ -1057,16 +1044,14 @@ class MoRIIOConnectorWorker:
         logger.debug("Detected attention backend %s", self.backend_name)
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.world_size}
-        # With heterogeneous TP, P must wait for all assigned D TP workers to
-        # finish reading before safely freeing the blocks.
-        self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
+      
 
         ####write worker###
         self._write_task_q: Queue[WriteTask] = Queue()
         self._write_worker_started = False
         self._write_worker_lock = threading.Lock()
         self._deferred_tasks: list[WriteTask] = []
-        ###
+        ####write worker###
 
     def _ensure_write_worker(self):
         if self._write_worker_started:
@@ -1179,7 +1164,8 @@ class MoRIIOConnectorWorker:
             transfer_local_offsets=a,
             transfer_remote_offsets=b,
             transfer_sizes=c,
-            use_batch=True
+            use_batch=True,
+            # use_batch=False
         )
 
     def _do_layer_write(self, plan: LayerTransferPlan, sessions):
@@ -1214,12 +1200,24 @@ class MoRIIOConnectorWorker:
             )
 
     def _execute_write_task(self, task: WriteTask):
+        
+        # Execution process is divided into:
+        # Get transport session information.
+        # Calculate transport address and byte information.
+        # Transport.
+        # Check req_id transport completion and notification.
+        
         if GLOBAL_MORIIO_MODE == MoRIIOMode.READ:
             return
         request_info = self._get_remote_alloc_info(task.request_id)
         if request_info.block_ids is None:
             # logger.debug("Request %s remote block ids not ready", task.request_id)
             return
+        
+        
+        #Note that data transfer at the current layer cannot overlap with GPU attention kernel computation.
+        #Moriio's data transfer may cause numerical precision errors.
+        #We have added event synchronization after enqueueing (post attention kernel launch) to prevent this behavior.
         task.event.synchronize()
         
         task.dst_engine_id=task.dst_engine_id+"_dp"+str(request_info.decode_dp_rank)
@@ -1359,14 +1357,7 @@ class MoRIIOConnectorWorker:
         # a hack to keep us moving. We will switch when moving to etcd
         # or where we have a single ZMQ socket in the scheduler.
 
-        # Handshake only with the remote TP rank that current local rank will
-        # pull from. With homogeneous TP it happens to be the same rank_i.
-
-        tp_ratio = self._tp_size[
-            self.
-            engine_id] // remote_tp_size
-        tp_ratio = 1
-        # p_remote_rank = self.tp_rank // tp_ratio
+    
         port_offset = get_port_offset(remote_dp_rank,self.tp_rank) 
         path = make_zmq_path("tcp", host, port + port_offset)
         logger.info("handeshake Querying metadata on path: %s at remote rank %s", path,)
@@ -1416,7 +1407,6 @@ class MoRIIOConnectorWorker:
             logger.debug("MoRIIO handshake: add agent took: %s",
                          setup_agent_time - got_metadata_time)
 
-        # Remote rank -> agent name.
         return {remote_agent_name}
 
     def _background_moriio_handshake(self, req_id: str,
@@ -1441,6 +1431,8 @@ class MoRIIOConnectorWorker:
             
         fut_list = []
         
+        # In dp(prefill)<->dp(decode) communication, we require an all-to-all handshake.
+
         for cur_dp_rank in range(remote_dp_size):
             dp_engine_id = f"{remote_engine_id}_dp{cur_dp_rank}"
             
@@ -1479,11 +1471,6 @@ class MoRIIOConnectorWorker:
         _, first_kv_cache = next(iter(kv_caches.items()))
         kv_elem_size = first_kv_cache.element_size()
 
-        # TODO(tms): Find a more robust way to detect and handle MLA
-        # NOTE (NickLucche) To move blocks efficiently with MoRIIO, the expected
-        # KV memory layout is HND, as opposed to the default NHD. Note that it
-        # will only affects the strides. For MLA instead, we make require no
-        # such thing and resort to the standard layout.
         use_mla = len(first_kv_cache.shape) == 3
         assert use_mla == self.use_mla
 
@@ -1744,12 +1731,8 @@ class MoRIIOConnectorWorker:
             else:
                 break
 
-        # Add to requests that are waiting to be read and track expiration.
         self._reqs_to_send.update(metadata.reqs_to_send)
-        # for req_id, req_meta in metadata.reqs_to_recv.items():
-            # self.moriio_wrapper.send_notify(
-            #     req_id, req_meta.remote_host,
-            #     req_meta.remote_notify_port + self.tp_rank)
+     
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         logger.debug(
