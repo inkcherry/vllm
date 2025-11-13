@@ -323,14 +323,14 @@ class MoRIIOWriter:
             Remote allocation information
             
         Raises:
-            HandshakeError: If allocation info is missing
+            KeyError: If allocation info is missing
         """
         try:
             return self.worker.moriio_wrapper.done_remote_allocate_req_dict[
                 request_id
             ]
         except KeyError as e:
-            raise HandshakeError(
+            raise KeyError(
                 f"Remote allocation info missing for request {request_id}"
             ) from e
     
@@ -340,7 +340,7 @@ class MoRIIOWriter:
         Args:
             task: The write task to execute
             
-        Raises:
+        Raises:#TODO
             TransferError: If transfer fails
             HandshakeError: If remote engine not ready
         """
@@ -1338,17 +1338,7 @@ class MoRIIOConnectorWorker:
         self._deferred_tasks: list[WriteTask] = []
         ####write worker###
 
-    def _ensure_write_worker(self):
-        if self._write_worker_started:
-            return
-        with self._write_worker_lock:
-            if self._write_worker_started:
-                return
-            t = threading.Thread(target=self._write_worker_loop,
-                                 daemon=True,
-                                 name="moriio-write-worker")
-            t.start()
-            self._write_worker_started = True
+   
 
     def schedule_write_blocks(
         self,
@@ -1388,31 +1378,7 @@ class MoRIIOConnectorWorker:
                          remote_ip=remote_ip)
         self._writer.schedule_write(task)
 
-    def _remote_blocks_ready(self, task: WriteTask) -> bool:
-        return task.request_id in self.moriio_wrapper.done_remote_allocate_req_dict
-
-    def _write_worker_loop(self):
-        while True:
-            still_defer: list[WriteTask] = []
-            if self._deferred_tasks:
-                for task in self._deferred_tasks:
-                    if self._remote_blocks_ready(task):
-                        self._execute_write_task(task)
-                    else:
-                        still_defer.append(task)
-                self._deferred_tasks = still_defer
-
-            try:
-                task = self._write_task_q.get(timeout=0.01)
-            except Empty:
-                continue
-
-            if not self._remote_blocks_ready(task):
-                task.retried += 1
-                self._deferred_tasks.append(task)
-                continue
-
-            self._execute_write_task(task)
+   
 
     def _get_built_session(self, remote_engine_id):
         if remote_engine_id not in self.builded_write_session:
@@ -1432,93 +1398,6 @@ class MoRIIOConnectorWorker:
             self.builded_write_session[
                 remote_engine_id] = cur_remote_engine_sessions
         return self.builded_write_session[remote_engine_id]
-
-
-    def _get_remote_alloc_info(self, request_id: str) -> RemoteAllocInfo:
-        try:
-            return self.moriio_wrapper.done_remote_allocate_req_dict[request_id]
-        except KeyError:
-            raise RuntimeError(f"RemoteAllocInfo missing for request {request_id}")
-
-  
-
-    def _prepare_layer_transfer(self, task: WriteTask,
-                                request_info: RemoteAllocInfo) -> LayerTransferPlan:
-        request_id = task.request_id
-        layer_name = task.layer_name
-        local_block_ids = task.local_block_ids
-        remote_block_ids = request_info.block_ids
-
-        if request_info.transfer_offset is None:
-            offs = self._compute_block_transfer_offsets(
-                layer_name, local_block_ids, remote_block_ids
-            )
-            request_info.transfer_offset = (offs[0], offs[1], offs[2])
-        # is_mla = (len(self.kv_cache_shape) == 3)
-        sess_idx = list(self.layer_name_to_local_kv_cache_metadata.keys()).index(layer_name)
-      
-
-        a, b, c = request_info.transfer_offset
-        return LayerTransferPlan(
-            request_id=request_id,
-            layer_name=layer_name,
-            sess_idx=sess_idx,
-            transfer_local_offsets=a,
-            transfer_remote_offsets=b,
-            transfer_sizes=c,
-        )
-
-    def _do_layer_write(self, plan: LayerTransferPlan, sessions):
-        self.moriio_wrapper.write_remote_data(
-            plan.transfer_sizes,
-            plan.transfer_local_offsets,
-            plan.transfer_remote_offsets,
-            sessions[plan.sess_idx])
-       
-
-    def _finalize_write_if_finished(self, request_id: str, request_info: RemoteAllocInfo, task: WriteTask):
-        request_info.writes_done += 1
-        if request_info.writes_done == self.num_layers:
-            #TODO:  wait current req_id transfer complete
-            self.moriio_wrapper.waiting_for_transfer_complete()
-            
-            the_remote_port=task.remote_notify_port  + get_port_offset(request_info.decode_dp_rank, self.tp_rank)
-            
-            # logger.info(f"send notify for write req {request_id=} {the_remote_port=}")
-            
-            self.moriio_wrapper.send_notify(
-                request_id,
-                task.remote_ip,
-                the_remote_port,
-            )
-
-    def _execute_write_task(self, task: WriteTask):
-        
-        # Execution process is divided into:
-        # Get transport session information.
-        # Calculate transport address and byte information.
-        # Transport.
-        # Check req_id transport completion and notification.
-        
-        if GLOBAL_MORIIO_MODE == MoRIIOMode.READ:
-            return
-        request_info = self._get_remote_alloc_info(task.request_id)
-        if request_info.block_ids is None:
-            # logger.debug("Request %s remote block ids not ready", task.request_id)
-            return
-        
-        
-        #Note that data transfer at the current layer cannot overlap with GPU attention kernel computation.
-        #Moriio's data transfer may cause numerical precision errors.
-        #We have added event synchronization after enqueueing (post attention kernel launch) to prevent this behavior.
-        task.event.synchronize()
-        
-        task.dst_engine_id=task.dst_engine_id+"_dp"+str(request_info.decode_dp_rank)
-        sessions = self._get_built_session(task.dst_engine_id)
-        plan = self._prepare_layer_transfer(task, request_info)
-        self._do_layer_write(plan, sessions)
-        self._finalize_write_if_finished(task.request_id, request_info,task)
-    
 
     def _ping(self, zmq_context):
         PING_INTERVAL = 5
