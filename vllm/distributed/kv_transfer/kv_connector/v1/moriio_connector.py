@@ -187,9 +187,6 @@ class MoRIIOConfig:
         
 GLOBAL_MORIIO_MODE = get_moriio_mode()
 
-
-
-
 class MoRIIOWrapper:
 
     def __init__(self, moriio_engine=None,tp_rank=0,dp_rank=0):
@@ -339,7 +336,7 @@ class MoRIIOWrapper:
         self.notify_thread.start()
 
     def _handle_message(self, msg: bytes):
-        
+        """Handles incoming messages from remote nodes."""
         # Handles incoming remote messages:
         # Prefill Role:
         #   [write] mode: receives block information (allocation)
@@ -509,7 +506,6 @@ class MoRIIOConnector(KVConnectorBase_V1):
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
         assert vllm_config.kv_transfer_config is not None
         # assert vllm_config.kv_transfer_config.engine_id is not None
-        # self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
         self.engine_id = str(
             get_ip()) + ":" + str(vllm_config.kv_transfer_config.
                                   kv_connector_extra_config['handshake_port'])
@@ -580,7 +576,6 @@ class MoRIIOConnector(KVConnectorBase_V1):
         self.connector_worker.start_load_kv(self._connector_metadata)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        """NixlConnector does not do layerwise saving."""
         pass
 
     def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor,
@@ -1002,9 +997,9 @@ class MoRIIOConnectorWorker:
         # have the same number of blocks.
         self.dst_num_blocks: dict[EngineId, int] = {}
         # In progress transfers.
-        # [req_id -> list[handle]]
         self._recving_transfers:defaultdict[ReqId, list]={}
         self._recving_transfers_callback_addr: dict[ReqId, tuple[str,str]]
+        
         # Track the expiration time of requests that are waiting to be sent.
         self._reqs_to_send: dict[ReqId, float] = {}
 
