@@ -52,6 +52,7 @@ ReqId = str
 GET_META_MSG = b"get_meta_msg"
 POP_DONE_RECV = b"pop_done_recv"
 OVER = b"OVER"
+COMPLETION_PREFIX ="cmpl"
 
 try:
     import mori
@@ -69,7 +70,7 @@ class WriteTask:
     request_id: str
     dst_engine_id: str
     local_block_ids: list[int]
-    remote_block_ids_hint: list[int] | None
+    remote_block_ids_hint: Optional[list[int]]
     layer_name: str
     event: torch.cuda.Event
     remote_notify_port: int
@@ -357,7 +358,7 @@ class MoRIIOWrapper:
 
         try:
             msg_str = msg.decode("UTF-8")
-            if msg_str.startswith("cmpl"):
+            if msg_str.startswith(COMPLETION_PREFIX):
                 self._handle_completion_message(msg_str)
                 handled = True
         except UnicodeDecodeError:
@@ -1628,9 +1629,7 @@ class MoRIIOConnectorWorker:
                     self._recving_transfers_callback_addr[req_id][1])
                 del self._recving_transfers[req_id]
                 del self._recving_transfers_callback_addr[req_id]
-                
-                
-                
+                     
         return done_req_ids
 
 
