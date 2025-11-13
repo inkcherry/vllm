@@ -1017,6 +1017,7 @@ class MoRIIOConnectorWorker:
         # In progress transfers.
         # [req_id -> list[handle]]
         self._recving_transfers:defaultdict[ReqId, list]={}
+        self._recving_transfers_callback_addr: dict[ReqId, tuple[str,str]]
         # Track the expiration time of requests that are waiting to be sent.
         self._reqs_to_send: dict[ReqId, float] = {}
 
@@ -1639,7 +1640,15 @@ class MoRIIOConnectorWorker:
         for req_id, status_list in self._recving_transfers.items():
             if status_list[-1].Succeeded():
                 done_req_ids.add(req_id)
+                
+                self.moriio_wrapper.send_notify(
+                    req_id,self._recving_transfers_callback_addr[req_id][0],
+                    self._recving_transfers_callback_addr[req_id][1])
                 del self._recving_transfers[req_id]
+                del self._recving_transfers_callback_addr[req_id]
+                
+                
+                
         return done_req_ids
 
 
@@ -1737,12 +1746,10 @@ class MoRIIOConnectorWorker:
 
         # Add to requests that are waiting to be read and track expiration.
         self._reqs_to_send.update(metadata.reqs_to_send)
-
-        for req_id, req_meta in metadata.reqs_to_recv.items():
-
-            self.moriio_wrapper.send_notify(
-                req_id, req_meta.remote_host,
-                req_meta.remote_notify_port + self.tp_rank)
+        # for req_id, req_meta in metadata.reqs_to_recv.items():
+            # self.moriio_wrapper.send_notify(
+            #     req_id, req_meta.remote_host,
+            #     req_meta.remote_notify_port + self.tp_rank)
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         logger.debug(
@@ -1753,6 +1760,8 @@ class MoRIIOConnectorWorker:
             dst_engine_id=meta.remote_engine_id,
             local_block_ids=meta.local_block_ids,
             remote_block_ids=meta.remote_block_ids,
+            remote_host=meta.remote_host,
+            remote_notify_port=meta.remote_notify_port,
         )
 
     def _write_blocks_for_req(self, req_id: str, meta: ReqMeta, layer_name,
@@ -1895,7 +1904,9 @@ class MoRIIOConnectorWorker:
         return merged_l, merged_r, merged_s
     def _read_blocks(self, local_block_ids: list[int],
                      remote_block_ids: list[int], dst_engine_id: str,
-                     request_id: str):
+                     request_id: str,
+                     remote_host: str,
+                     remote_notify_port: int):
 
         if GLOBAL_MORIIO_MODE == MoRIIOMode.WRITE:
             return
@@ -1909,8 +1920,15 @@ class MoRIIOConnectorWorker:
         for layer_name in self.layer_name_to_local_kv_cache_metadata.keys():
             sess_idx = list(self.layer_name_to_local_kv_cache_metadata.keys()).index(layer_name)
             transfer_status=self.moriio_wrapper.read_remote_data(c, a, b, sessions[sess_idx])
+            
             self._recving_transfers[request_id].append(transfer_status)
             # self.moriio_wrapper.waiting_for_transfer_complete()
+            self._recving_transfers_callback_addr[request_id]=(remote_host,remote_notify_port + self.tp_rank)
+            
+            
+
+            # req_meta.remote_host,
+            # req_meta.remote_notify_port + self.tp_rank
 
 @contextlib.contextmanager
 def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
