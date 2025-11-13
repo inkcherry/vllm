@@ -1905,13 +1905,8 @@ class MoRIIOConnectorWorker:
             transfer_status=self.moriio_wrapper.read_remote_data(c, a, b, sessions[sess_idx])
             
             self._recving_transfers[request_id].append(transfer_status)
-            # self.moriio_wrapper.waiting_for_transfer_complete()
             self._recving_transfers_callback_addr[request_id]=(remote_host,remote_notify_port + self.tp_rank)
             
-            
-
-            # req_meta.remote_host,
-            # req_meta.remote_notify_port + self.tp_rank
 
 @contextlib.contextmanager
 def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
