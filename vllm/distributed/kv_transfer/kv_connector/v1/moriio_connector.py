@@ -43,6 +43,7 @@ from dataclasses import field
 from queue import Empty, Queue
 from enum import Enum
 import logging
+logger = init_logger(__name__)
 
 Transfer = tuple[int, float]  
 EngineId = str
@@ -52,6 +53,16 @@ GET_META_MSG = b"get_meta_msg"
 POP_DONE_RECV = b"pop_done_recv"
 OVER = b"OVER"
 
+try:
+    import mori
+    from mori.io import (BackendType, EngineDesc, IOEngine, IOEngineConfig,
+                         MemoryDesc, StatusCode)
+    logger.info("MoRIIO is available")
+    MoRIIO_enabled = True
+except ImportError:
+    logger.error("MoRIIO is not available")
+    MoRIIO_enabled = False
+    
 logging.getLogger("aiter").disabled = True
 @dataclass
 class WriteTask:
@@ -106,7 +117,6 @@ class MoRIIOMode(Enum):
     READ = "read"
     WRITE = "write"
 
-logger = init_logger(__name__)
 
 def get_moriio_mode() -> MoRIIOMode:
     read_mode = os.environ.get('MORIIO_CONNECTOR_READ_MODE', 'false').lower()
@@ -139,7 +149,15 @@ class MoRIIOConfig:
     
     @classmethod
     def from_vllm_config(cls, vllm_config: VllmConfig) -> "MoRIIOConfig":
-        """从vllm配置创建MoRIIO配置"""
+        
+        
+        # Port Configuration:
+        # local_ping_port   -> Outgoing heartbeat to proxy
+        # proxy_ping_port   -> Remote proxy's heartbeat ingress port
+        # http_port         -> Instance's HTTP service endpoint
+        # local_kv_port     -> KV service port for Mori engine
+        # notify_port       -> For synchronizing stages between nodes
+        
         kv_transfer_config = vllm_config.kv_transfer_config
         extra_config = kv_transfer_config.kv_connector_extra_config
         tp_rank = get_tensor_model_parallel_rank()
@@ -149,8 +167,8 @@ class MoRIIOConfig:
         base_notify_port = int(extra_config["notify_port"])
         dp_size=vllm_config.parallel_config.data_parallel_size
         tp_size=get_tensor_model_parallel_world_size()
-        # port_offset = (tp_rank + 1) * (dp_rank + 1)
         port_offset=get_port_offset(dp_rank,tp_rank)
+        
         return cls(
             local_ip=get_ip(),
             local_kv_port=base_kv_port + port_offset,
@@ -169,15 +187,7 @@ class MoRIIOConfig:
         
 GLOBAL_MORIIO_MODE = get_moriio_mode()
 
-try:
-    import mori
-    from mori.io import (BackendType, EngineDesc, IOEngine, IOEngineConfig,
-                         MemoryDesc, StatusCode)
-    logger.info("MoRIIO is available")
-    MoRIIO_enabled = True
-except ImportError:
-    logger.error("MoRIIO is not available")
-    MoRIIO_enabled = False
+
 
 
 class MoRIIOWrapper:
@@ -252,7 +262,6 @@ class MoRIIOWrapper:
             local_offset, remote_offset, transfer_size_byte,
             self.moriio_engine.allocate_transfer_uid())
 
-        # self.transfer_status.append(transfer_status)
         return transfer_status
 
     def write_remote_data(self,
@@ -302,9 +311,8 @@ class MoRIIOWrapper:
                 logger.error(f"Transfer {status} failed: {e}")
                 raise
 
-    def async_wait_reqid(self, kv_caches=None):
-        if kv_caches is not None:
-            self.kv_caches = kv_caches
+    def async_wait_reqid(self):
+      
 
         assert self.notify_port is not None, "Notify port cannot be None"
 
@@ -331,6 +339,13 @@ class MoRIIOWrapper:
         self.notify_thread.start()
 
     def _handle_message(self, msg: bytes):
+        
+        # Handles incoming remote messages:
+        # Prefill Role:
+        #   [write] mode: receives block information (allocation)
+        #   [read]  mode: receives block release messages from decode side
+        # Decode Role:
+        #   [write] mode: receives KV cache write completion notifications
         handled = False
         try:
             data = msgpack.loads(msg)
@@ -364,10 +379,8 @@ class MoRIIOWrapper:
             self.done_remote_allocate_req_dict[req_id] = RemoteAllocInfo(block_ids=int_list,decode_dp_rank=decode_dp_rank)
 
     def _handle_completion_message(self, msg: str):
-        # logger.info(f"MoRIIO received block message: {msg}")
         with self.lock:
             if get_role() == ROLE.PRODUCER:
-                # logger.debug(f"P received req id {msg} for release")
                 self.done_req_ids.append(msg)
             else:
                 self.done_write_cache_req_ids.append(msg)
@@ -482,7 +495,6 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             remote_port=kv_transfer_params["remote_port"],
             remote_handshake_port=kv_transfer_params['remote_handshake_port'],
             remote_notify_port=kv_transfer_params.get('remote_notify_port'),
-            # P workers don't need to receive tp_size from proxy here.
             tp_size=kv_transfer_params.get("tp_size", 1),
             remote_dp_size=kv_transfer_params.get("remote_dp_size", 1)
         )
@@ -584,7 +596,7 @@ class MoRIIOConnector(KVConnectorBase_V1):
         return None
 
     def wait_for_save(self):
-        """NixlConnector does not save explicitly."""
+        """MoriIOConnector does not save explicitly."""
 
         pass
 
@@ -606,10 +618,6 @@ class MoRIIOConnectorScheduler:
         logger.info(
             f"==========> Initializing MoRIIO Scheduler {engine_id = },{self.side_channel_port = }"
         )
-        
-        # logger.info(
-        #     f"==========> Initializing MoRIIO Scheduler {engine_id = }"
-        # )
 
         self.side_notify_port = self.vllm_config.kv_transfer_config.kv_connector_extra_config[
             'notify_port']  # envs.VLLM_NIXL_SIDE_CHANNEL_PORT +
@@ -680,7 +688,7 @@ class MoRIIOConnectorScheduler:
             "decode_rank": self.dp_rank,
             "type": "remote_blocks"
         }
-        # logger.info(f"MoRIIO send notify block for prefill, {data= },{host= },{port= }")
+        # logger.debug(f"MoRIIO send notify block for prefill, {data= },{host= },{port= }")
         serialized_data = msgpack.dumps(data)
         self.paths[path].send(serialized_data)
 
@@ -692,7 +700,6 @@ class MoRIIOConnectorScheduler:
             connector_worker: Optional["MoRIIOConnectorWorker"] = None):
 
         params = request.kv_transfer_params
-        # logger.info(f"enter alloc :{request.request_id}")
         if params.get("do_remote_decode"):
             local_block_ids = blocks.get_block_ids()[0]
             self._reqs_need_save[request.request_id] = (request,
@@ -887,13 +894,7 @@ class MoRIIOConnectorWorker:
         self.http_port = self.moriio_config.http_port
         self.handshake_port = self.moriio_config.handshake_port
         self.notify_port = self.moriio_config.notify_port
-        # self.local_metadata_port = int(self.kv_transfer_config.kv_connector_extra_config['metadata_port'])
-        '''
-        ping: local_ip:local_ping_port -> proxy_ip:proxy_ping_port
-        prompt request: user_ip:user_port -> proxy_ip:proxy_listening_port -> local_ip:http_port
-        kvcache: local_ip:local_kv_port <-> ...
-        metadata: local_ip:local_metadata_port <->
-        '''
+    
         self.zmq_context = zmq.Context()
         self.metadata_address = f"{self.moriio_config.local_ip}:{self.moriio_config.local_ping_port}"
         self.request_address = f"{self.moriio_config.local_ip}:{self.moriio_config.http_port}"
@@ -984,7 +985,6 @@ class MoRIIOConnectorWorker:
             self.moriio_config.handshake_port +
                 get_port_offset(self.dp_rank,self.tp_rank)  
         )
-        #why wuxiao 
         logger.info(f"MoRIIO Worker init {self.tp_rank = },{self.dp_rank= }")
         logger.info(f"MoRIIO side channel_port port: {self.side_channel_port}, han")
         # Metadata.
@@ -1601,7 +1601,7 @@ class MoRIIOConnectorWorker:
             name="moriio_handshake_listener")
         self._moriio_handshake_listener_t.start()
         ready_event.wait()  # Wait for listener ZMQ socket to be ready.
-        self.moriio_wrapper.async_wait_reqid(self.kv_caches)
+        self.moriio_wrapper.async_wait_reqid()
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """
