@@ -190,6 +190,292 @@ class MoRIIOConfig:
         
 GLOBAL_MORIIO_MODE = get_moriio_mode()
 
+"""Write task execution logic for MoRIIO connector."""
+
+import threading
+import time
+from queue import Queue, Empty
+from typing import Optional
+from collections import defaultdict
+
+from vllm.logger import init_logger
+
+
+logger = init_logger(__name__)
+
+
+class MoRIIOWriter:
+    """Handles write operations for KV cache transfers."""
+    
+    def __init__(self, worker: "MoRIIOConnectorWorker"):
+        """Initialize the writer.
+        
+        Args:
+            worker: Reference to the parent worker
+        """
+        self.worker = worker
+        self._write_task_q: Queue[WriteTask] = Queue()
+        self._write_worker_started = False
+        self._write_worker_lock = threading.Lock()
+        self._deferred_tasks: list[WriteTask] = []
+    
+    def ensure_worker_started(self) -> None:
+        """Ensure the background write worker is running."""
+        if self._write_worker_started:
+            return
+        
+        with self._write_worker_lock:
+            if self._write_worker_started:
+                return
+            
+            thread = threading.Thread(
+                target=self._write_worker_loop,
+                daemon=True,
+                name="moriio-write-worker"
+            )
+            thread.start()
+            self._write_worker_started = True
+            logger.info("Started MoRIIO write worker thread")
+    
+    def schedule_write(self, task: WriteTask) -> None:
+        """Schedule a write task.
+        
+        Args:
+            task: The write task to schedule
+        """
+        self.ensure_worker_started()
+        self._write_task_q.put(task)
+    
+    def _write_worker_loop(self) -> None:
+        """Main loop for the write worker thread."""
+        logger.info("Write worker loop started")
+        
+        while True:
+            # Process deferred tasks first
+            self._process_deferred_tasks()
+            
+            # Get new task
+            try:
+                task = self._write_task_q.get(
+                    timeout=0.01
+                )
+            except Empty:
+                continue
+            
+            # Check if remote blocks are ready
+            if not self._is_remote_ready(task):
+                task.retry_count += 1
+                self._deferred_tasks.append(task)
+                logger.debug(
+                    "Deferred task for request %s (retry %d)",
+                    task.request_id, task.retry_count
+                )
+                continue
+            
+            # Execute the task
+            try:
+                self._execute_write_task(task)
+            except Exception as e:
+                logger.error(
+                    "Failed to execute write task for request %s: %s",
+                    task.request_id, e, exc_info=True
+                )
+    
+    def _process_deferred_tasks(self) -> None:
+        """Process tasks that were previously deferred."""
+        if not self._deferred_tasks:
+            return
+        
+        still_deferred: list[WriteTask] = []
+        for task in self._deferred_tasks:
+            if self._is_remote_ready(task):
+                try:
+                    self._execute_write_task(task)
+                except Exception as e:
+                    logger.error(
+                        "Failed to execute deferred task for request %s: %s",
+                        task.request_id, e, exc_info=True
+                    )
+            else:
+                still_deferred.append(task)
+        
+        self._deferred_tasks = still_deferred
+    
+    def _is_remote_ready(self, task: WriteTask) -> bool:
+        """Check if remote blocks are allocated for this task.
+        
+        Args:
+            task: The write task
+            
+        Returns:
+            True if remote blocks are ready
+        """
+        return (task.request_id in 
+                self.worker.moriio_wrapper.done_remote_allocate_req_dict)
+    
+    def _get_remote_alloc_info(self, request_id: str) -> RemoteAllocInfo:
+        """Get remote allocation info for a request.
+        
+        Args:
+            request_id: The request ID
+            
+        Returns:
+            Remote allocation information
+            
+        Raises:
+            HandshakeError: If allocation info is missing
+        """
+        try:
+            return self.worker.moriio_wrapper.done_remote_allocate_req_dict[
+                request_id
+            ]
+        except KeyError as e:
+            raise HandshakeError(
+                f"Remote allocation info missing for request {request_id}"
+            ) from e
+    
+    def _execute_write_task(self, task: WriteTask) -> None:
+        """Execute a single write task.
+        
+        Args:
+            task: The write task to execute
+            
+        Raises:
+            TransferError: If transfer fails
+            HandshakeError: If remote engine not ready
+        """
+        # Get remote allocation info
+        request_info = self._get_remote_alloc_info(task.request_id)
+        
+        if request_info.block_ids is None:
+            logger.debug(
+                "Request %s remote block IDs not ready",
+                task.request_id
+            )
+            return
+        
+        # Wait for CUDA event
+        task.event.synchronize()
+        
+        # Update engine ID with DP rank
+        task.dst_engine_id = (
+            f"{task.dst_engine_id}_dp{request_info.decode_dp_rank}"
+        )
+        
+        # Get or create sessions
+        sessions = self.worker._get_built_session(task.dst_engine_id)
+        
+        # Prepare transfer plan
+        plan = self._prepare_transfer_plan(task, request_info)
+        
+        # Execute transfer
+        self._do_layer_write(plan, sessions)
+        
+        # Finalize if all layers complete
+        self._finalize_if_complete(task, request_info)
+    
+    def _prepare_transfer_plan(
+        self,
+        task: WriteTask,
+        request_info: RemoteAllocInfo
+    ) -> LayerTransferPlan:
+        """Prepare the transfer plan for a layer.
+        
+        Args:
+            task: The write task
+            request_info: Remote allocation information
+            
+        Returns:
+            The transfer plan
+        """
+        # Compute offsets if not cached
+        if request_info.transfer_offset is None:
+            offsets = self.worker._compute_block_transfer_offsets(
+                task.layer_name,
+                task.local_block_ids,
+                request_info.block_ids
+            )
+            request_info.transfer_offset = offsets
+        
+        # Get session index
+        layer_names = list(
+            self.worker.layer_name_to_local_kv_cache_metadata.keys()
+        )
+        sess_idx = layer_names.index(task.layer_name)
+        
+        local_off, remote_off, sizes = request_info.transfer_offset
+        
+        return LayerTransferPlan(
+            request_id=task.request_id,
+            layer_name=task.layer_name,
+            sess_idx=sess_idx,
+            transfer_local_offsets=local_off,
+            transfer_remote_offsets=remote_off,
+            transfer_sizes=sizes,
+            use_batch=True
+        )
+    
+    def _do_layer_write(
+        self,
+        plan: LayerTransferPlan,
+        sessions: list
+    ) -> None:
+        """Perform the actual layer write.
+        
+        Args:
+            plan: The transfer plan
+            sessions: List of transfer sessions
+        """
+        if plan.use_batch:
+            self.worker.moriio_wrapper.write_remote_data(
+                plan.transfer_sizes,
+                plan.transfer_local_offsets,
+                plan.transfer_remote_offsets,
+                sessions[plan.sess_idx]
+            )
+        else:
+            for i in range(len(plan.transfer_local_offsets)):
+                self.worker.moriio_wrapper.write_remote_data_single(
+                    plan.transfer_sizes[i],
+                    plan.transfer_local_offsets[i],
+                    plan.transfer_remote_offsets[i],
+                    plan.sess_idx
+                )
+    
+    def _finalize_if_complete(
+        self,
+        task: WriteTask,
+        request_info: RemoteAllocInfo
+    ) -> None:
+        """Finalize transfer if all layers are complete.
+        
+        Args:
+            task: The write task
+            request_info: Remote allocation information
+        """
+        request_info.writes_done += 1
+        
+        if request_info.writes_done >= self.worker.num_layers:
+            # Wait for transfer to complete
+            self.worker.moriio_wrapper.waiting_for_transfer_complete()
+            
+         
+            remote_port = task.remote_notify_port + get_port_offset(
+                request_info.decode_dp_rank,
+                self.worker.tp_rank
+            )
+            
+            # Send completion notification
+            self.worker.moriio_wrapper.send_notify(
+                task.request_id,
+                task.remote_ip,
+                remote_port
+            )
+            
+            logger.debug(
+                "Completed transfer for request %s, notified port %d",
+                task.request_id, remote_port
+            )
 class MoRIIOWrapper:
 
     def __init__(self, moriio_engine=None,tp_rank=0,dp_rank=0):
@@ -902,7 +1188,7 @@ class MoRIIOConnectorWorker:
         self.moriio_engine = None
         self._handle_request_thread = None
         self._ping_thread = None
-     
+        self._writer = MoRIIOWriter(self)
         
         engine_suffix = (f"{self.moriio_config.local_ip}:{self.moriio_config.handshake_port}"
                          f":tp {self.tp_rank}:dp {self.dp_rank}")
@@ -1064,12 +1350,29 @@ class MoRIIOConnectorWorker:
             t.start()
             self._write_worker_started = True
 
-    def schedule_write_blocks(self, request_id: str, dst_engine_id: str,
-                              local_block_ids: list[int],
-                              remote_block_ids: list[int] | None,
-                              layer_name: str, kv_layer: torch.Tensor,
-                              remote_notify_port: int, remote_ip: str):
-        self._ensure_write_worker()
+    def schedule_write_blocks(
+        self,
+        request_id: str,
+        dst_engine_id: str,
+        local_block_ids: list[int],
+        remote_block_ids: Optional[list[int]],
+        layer_name: str,
+        kv_layer: torch.Tensor,
+        remote_notify_port: int,
+        remote_ip: str
+    ) -> None:
+        """Schedule a block write operation.
+        
+        Args:
+            request_id: Unique identifier for the request
+            dst_engine_id: Destination engine ID
+            local_block_ids: Local block IDs to transfer
+            remote_block_ids: Hint for remote block IDs
+            layer_name: Name of the layer
+            kv_layer: KV cache tensor
+            remote_notify_port: Port for completion notification
+            remote_ip: IP address of remote node
+        """
 
         stream = torch.cuda.current_stream()
         event = torch.cuda.Event()
@@ -1083,7 +1386,7 @@ class MoRIIOConnectorWorker:
                          event=event,
                          remote_notify_port=remote_notify_port,
                          remote_ip=remote_ip)
-        self._write_task_q.put(task)
+        self._writer.schedule_write(task)
 
     def _remote_blocks_ready(self, task: WriteTask) -> bool:
         return task.request_id in self.moriio_wrapper.done_remote_allocate_req_dict
@@ -1163,24 +1466,15 @@ class MoRIIOConnectorWorker:
             transfer_local_offsets=a,
             transfer_remote_offsets=b,
             transfer_sizes=c,
-            use_batch=True,
-            # use_batch=False
         )
 
     def _do_layer_write(self, plan: LayerTransferPlan, sessions):
-        if plan.use_batch:
-            self.moriio_wrapper.write_remote_data(
-                plan.transfer_sizes,
-                plan.transfer_local_offsets,
-                plan.transfer_remote_offsets,
-                sessions[plan.sess_idx])
-        else:
-            for i in range(len(plan.transfer_local_offsets)):
-                self.moriio_wrapper.write_remote_data_single(
-                    plan.transfer_sizes[i],
-                    plan.transfer_local_offsets[i],
-                    plan.transfer_remote_offsets[i],
-                    plan.sess_idx)
+        self.moriio_wrapper.write_remote_data(
+            plan.transfer_sizes,
+            plan.transfer_local_offsets,
+            plan.transfer_remote_offsets,
+            sessions[plan.sess_idx])
+       
 
     def _finalize_write_if_finished(self, request_id: str, request_info: RemoteAllocInfo, task: WriteTask):
         request_info.writes_done += 1
