@@ -172,7 +172,7 @@ class ConfigurationError(MoRIIOError):
 
 def get_moriio_mode() -> MoRIIOMode:
     read_mode = os.environ.get('MORIIO_CONNECTOR_READ_MODE', 'false').lower()
-    logger.info(f"MoRIIO Connector Read Mode = {read_mode}")
+    # logger.info(f"MoRIIO Connector Read Mode = {read_mode}")
     if read_mode in ('true', '1', 'yes', 'on'):
         return MoRIIOMode.READ
     else:
@@ -1481,6 +1481,7 @@ class MoRIIOConnectorWorker:
                         "notify_port": self.notify_port,
                         "dp_size":self.moriio_config.dp_size,
                         "tp_size":self.moriio_config.tp_size,
+                        "transfer_mode":get_moriio_mode().name,
                     }
 
                     sock.send(msgpack.dumps(data))
