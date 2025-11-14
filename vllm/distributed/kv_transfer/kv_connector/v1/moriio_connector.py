@@ -49,11 +49,22 @@ Transfer = tuple[int, float]
 EngineId = str
 ReqId = str
 
-GET_META_MSG = b"get_meta_msg"
-POP_DONE_RECV = b"pop_done_recv"
-OVER = b"OVER"
-COMPLETION_PREFIX ="cmpl"
 
+class MoRIIOConstants:
+    """Constants for MoRIIO connector."""
+    
+    # ZMQ message types
+    GET_META_MSG = b"get_meta_msg"
+    POP_DONE_RECV = b"pop_done_recv"
+    OVER = b"OVER"
+    COMPLETION_PREFIX = "cmpl"
+
+    
+    # Network
+    RANK_PER_NODE = 8
+    
+   
+    
 try:
     import mori
     from mori.io import (BackendType, EngineDesc, IOEngine, IOEngineConfig,
@@ -103,23 +114,61 @@ class ROLE(Enum):
     CONSUMER = "consumer"
     NOTINIT = "notinit"
 
+class RoleManager:
+    """Manages role state across the connector."""
+    
+    _instance: Optional["RoleManager"] = None
+    _lock = threading.Lock()
+    
+    def __init__(self) -> None:
+        self._role: ROLE = ROLE.NOTINIT
+    
+    @classmethod
+    def get_instance(cls) -> "RoleManager":
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = cls()
+        return cls._instance
+    
+    def set_role(self, role: ROLE) -> None:
+        """Set the current role."""
+        with self._lock:
+            self._role = role
+    
+    def get_role(self) -> ROLE:
+        """Get the current role."""
+        return self._role
 
-_role_lock = threading.Lock()
-_GLOBAL_ROLE: ROLE = ROLE.NOTINIT
 
 def set_role(role: ROLE):
-    global _GLOBAL_ROLE
-    with _role_lock:
-        _GLOBAL_ROLE = role
+    """Set the global role."""
+    RoleManager.get_instance().set_role(role)
 
 def get_role() -> ROLE:
-    return _GLOBAL_ROLE
+    """Get the global role."""
+    return RoleManager.get_instance().get_role()
 
 
 class MoRIIOMode(Enum):
     READ = "read"
     WRITE = "write"
 
+class MoRIIOError(Exception):
+    """Base exception for MoRIIO operations."""
+    pass
+
+class HandshakeError(MoRIIOError):
+    """Exception raised when handshake fails."""
+    pass
+
+class TransferError(MoRIIOError):
+    """Exception raised when transfer fails."""
+    pass
+
+class ConfigurationError(MoRIIOError):
+    """Exception raised for configuration errors."""
+    pass
 
 def get_moriio_mode() -> MoRIIOMode:
     read_mode = os.environ.get('MORIIO_CONNECTOR_READ_MODE', 'false').lower()
@@ -131,8 +180,7 @@ def get_moriio_mode() -> MoRIIOMode:
 
 
 def get_port_offset(dp_rank: int,tp_rank: int, tp_size:int=1) -> int:
-    RANK_PER_NODE=8
-    return ((dp_rank)*tp_size+tp_rank )%RANK_PER_NODE
+    return ((dp_rank)*tp_size+tp_rank )%MoRIIOConstants.RANK_PER_NODE
 
 @dataclass
 class MoRIIOConfig:
@@ -477,7 +525,17 @@ class MoRIIOWriter:
                 task.request_id, remote_port
             )
 class MoRIIOWrapper:
-
+    """Wrapper for MoRIIO engine operations.
+    
+    Manages MoRIIO engine lifecycle, tensor registration, and data transfer operations.
+    Handles both producer and consumer roles for KV cache transfers.
+    
+    Args:
+        moriio_engine: Optional MoRIIO engine instance
+        tp_rank: Tensor parallel rank
+        dp_rank: Data parallel rank
+    """
+    
     def __init__(self, moriio_engine=None,tp_rank=0,dp_rank=0):
         self.tp_rank=tp_rank
         self.dp_rank=dp_rank
@@ -496,7 +554,6 @@ class MoRIIOWrapper:
         self.done_write_cache_req_ids = []
         self.notify_thread = None
         self.sock = None
-        self.tp_rank = get_tensor_model_parallel_rank()
         self.sessions = []
         self.kv_caches = None
         self.paths = {}
@@ -526,7 +583,7 @@ class MoRIIOWrapper:
                 tensor)
             local_memory_metadata_packed = self.local_memory_metadata.pack()
         except Exception as e:
-            logger.error(f"MoRIIO register local memory failed! reason = {e}")
+            raise TransferError(f"Failed to register local memory: {e}") from e
         self.local_memory_registered = True
         return local_memory_metadata_packed
 
@@ -592,7 +649,7 @@ class MoRIIOWrapper:
                     logger.error(
                         f"Transfer failed: {status.Message()}, Code: {status.Code()}"
                     )
-                    raise RuntimeError(f"MoRIIO transfer failed!")
+                    raise TransferError(f"MoRIIO transfer failed!")
             except Exception as e:
                 logger.error(f"Transfer {status} failed: {e}")
                 raise
@@ -617,6 +674,7 @@ class MoRIIOWrapper:
                         self._handle_message(msg)
                     except Exception as e:
                         logger.error(f"Error processing message: {e}")
+                        raise HandshakeError(f"Error processing message: {e}") from e
                         continue
 
         self.notify_thread = threading.Thread(target=_async_wait,
@@ -646,7 +704,7 @@ class MoRIIOWrapper:
 
         try:
             msg_str = msg.decode("UTF-8")
-            if msg_str.startswith(COMPLETION_PREFIX):
+            if msg_str.startswith(MoRIIOConstants.COMPLETION_PREFIX):
                 self._handle_completion_message(msg_str)
                 handled = True
         except UnicodeDecodeError:
@@ -1287,8 +1345,8 @@ class MoRIIOConnectorWorker:
         # have the same number of blocks.
         self.dst_num_blocks: dict[EngineId, int] = {}
         # In progress transfers.
-        self._recving_transfers:defaultdict[ReqId, list]={}
-        self._recving_transfers_callback_addr: dict[ReqId, tuple[str,str]]
+        self._recving_transfers:defaultdict[ReqId, list]=defaultdict(list)
+        self._recving_transfers_callback_addr: dict[ReqId, tuple[str,str]]= {}
         
         # Track the expiration time of requests that are waiting to be sent.
         self._reqs_to_send: dict[ReqId, float] = {}
@@ -1494,11 +1552,11 @@ class MoRIIOConnectorWorker:
             ready_event.set()
             while True:
                 identity, msg = sock.recv_multipart()
-                if msg != GET_META_MSG and msg != POP_DONE_RECV:
+                if msg != MoRIIOConstants.GET_META_MSG and msg != MoRIIOConstants.POP_DONE_RECV:
                     logger.warning(
                         "Connection listener got unexpected message %s", msg)
                     assert False, "handhsake failed!"
-                elif msg == GET_META_MSG:
+                elif msg == MoRIIOConstants.GET_META_MSG:
                     sock.send_multipart(
                         (identity, b"",
                          encoded_data))  # send local mori io engine meta data
@@ -1506,7 +1564,7 @@ class MoRIIOConnectorWorker:
                     # now we send tensor meta data for each block
                     buf = pickle.dumps(layer_name_to_local_kv_cache_metadata)
                     sock.send_multipart((identity, b"", buf))
-                elif msg == POP_DONE_RECV:
+                elif msg == MoRIIOConstants.POP_DONE_RECV:
                     _, req_id = sock.recv_multipart()
                     logger.info("MoRIIO handshake listener received done recv for req %s",
                                 req_id.decode())
@@ -1537,7 +1595,7 @@ class MoRIIOConnectorWorker:
         # Send query for the request.
         with zmq_ctx(zmq.DEALER, path) as sock:
             logger.info(f"prepare send msg  INSTAZNCE: {path}")
-            sock.send(GET_META_MSG)
+            sock.send(MoRIIOConstants.GET_META_MSG)
             received_frame = sock.recv_multipart()
             if len(received_frame) != 2 or received_frame[0] != b"":
                 assert 0, f"unexpected frame! {received_frame = }"
