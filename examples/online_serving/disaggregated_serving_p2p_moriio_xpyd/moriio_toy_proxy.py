@@ -195,6 +195,7 @@ async def handle_request():
         
         should_select_prefill_dp=False
         if prefill_instance_endpoint['dp_size']>1:
+            #dp ok
             should_select_prefill_dp=True
             dp_rank=request_nums % 8
             req_data['data_parallel_rank'] = dp_rank
