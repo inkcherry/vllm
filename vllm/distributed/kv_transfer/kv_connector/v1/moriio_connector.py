@@ -312,12 +312,12 @@ class MoRIIOWriter:
             
             # Check if remote blocks are ready
             if not self._is_remote_ready(task):
-                task.retry_count += 1
+                # task.retry_count += 1
                 self._deferred_tasks.append(task)
-                logger.debug(
-                    "Deferred task for request %s (retry %d)",
-                    task.request_id, task.retry_count
-                )
+                # logger.debug(
+                #     "Deferred task for request %s (retry %d)",
+                #     task.request_id, task.retry_count
+                # )
                 continue
             
             # Execute the task
@@ -935,7 +935,8 @@ class MoRIIOConnector(KVConnectorBase_V1):
                                                     layer_name, kv_layer,
                                                     attn_metadata, **kwargs)
         except Exception as e:
-            logger.info(f"MoRIIO save_kv_layer error: {e}")
+            pass
+            # logger.info(f"MoRIIO save_kv_layer error: {e}")
         return None
 
     def wait_for_save(self):
@@ -972,7 +973,13 @@ class MoRIIOConnectorScheduler:
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[ReqId, tuple[Request, list[int]]] = {}
         self._reqs_need_save: dict[ReqId, tuple[Request, list[int]]] = {}
+        self._reqs_need_pending_save: dict[ReqId, tuple[Request, list[int]]] = {}
 
+
+        if self.is_producer:
+            set_role(ROLE.PRODUCER)
+        else:
+            set_role(ROLE.CONSUMER)
         # Reqs to send and their expiration time
         self._reqs_need_send: dict[ReqId, float] = {}
         self.sock = None
@@ -999,6 +1006,12 @@ class MoRIIOConnectorScheduler:
               asynchronously (between scheduler steps).
         """
         if self.is_producer:
+            # start_idx = request.num_computed_tokens  
+            # start_tok = start_idx + 1  
+            # num_remaining_tokens = request.num_prompt_tokens - start_tok  
+            # if request.num_tokens <= num_remaining_tokens: 
+            #     b=0
+                
             return 0, False
 
         params = request.kv_transfer_params
@@ -1104,6 +1117,7 @@ class MoRIIOConnectorScheduler:
         if GLOBAL_MORIIO_MODE == MoRIIOMode.WRITE:
             # when async_load_kv finished, will add new reqs to scheduler_output.scheduled_new_reqs
             # should I use thread to add new req in async_wait_reqid?
+            #for decode only 
             for new_req in scheduler_output.scheduled_new_reqs:
                 red_id = new_req.req_id
                 local_block_ids = list(new_req.block_ids)
@@ -1114,6 +1128,27 @@ class MoRIIOConnectorScheduler:
                     local_block_ids,
                     kv_transfer_params,
                 )
+            if get_role()== ROLE.PRODUCER:
+                for i,req_id in enumerate(scheduler_output.scheduled_cached_reqs.req_ids):
+                    new_block_ids = scheduler_output.scheduled_cached_reqs.new_block_ids[i]  
+                    
+                    if new_block_ids is not None:  
+                        block_ids = new_block_ids[0]
+                        
+                        # self._reqs_need_pending_save[req_id][1]+=(block_ids)
+                        req, existing_blocks = self._reqs_need_pending_save[req_id]
+                        updated_blocks = list(existing_blocks) + ([block_ids] if isinstance(block_ids, int) else block_ids)
+                        self._reqs_need_pending_save[req_id] = (req, updated_blocks)
+
+                        if len(self._reqs_need_pending_save[req_id][1])==req.num_prompt_tokens:
+                            
+                            meta.add_new_req(
+                                request_id=req_id,
+                                local_block_ids=self._reqs_need_pending_save[req_id][1],
+                                kv_transfer_params=req.kv_transfer_params,
+                                write_mode=True,
+                            )
+                            del self._reqs_need_pending_save[req_id]
         # scheduler_output.scheduled_new_reqs[0].sampling_params.extra_args['kv_transfer_params']
         # Loop through scheduled reqs and convert to ReqMeta.
         for req_id, (req, block_ids) in self._reqs_need_recv.items():
@@ -1126,6 +1161,12 @@ class MoRIIOConnectorScheduler:
 
         for req_id, (req, block_ids) in self._reqs_need_save.items():
             assert req.kv_transfer_params is not None
+            if req.num_prompt_tokens>len(block_ids):
+                #  not last chunk prefill
+
+                self._reqs_need_pending_save[req_id] = (req, block_ids)
+                continue
+            #     b=0
             meta.add_new_req(
                 request_id=req_id,
                 local_block_ids=block_ids,
