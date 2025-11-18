@@ -706,7 +706,6 @@ class MoRIIOWrapper:
         block_notify_list = data.get("block_notify_list", [])
         decode_dp_rank=data.get("decode_rank",0)
         assert len(block_notify_list) > 0, "block_notify_list cannot be empty in remote allocate message"
-        msg_type = data.get("type", "unknown")
 
         with self.lock:
             self.done_remote_allocate_req_dict[req_id] = RemoteAllocInfo(block_ids=block_notify_list,decode_dp_rank=decode_dp_rank)
@@ -995,7 +994,6 @@ class MoRIIOConnectorScheduler:
         if self.is_producer:
             return 0, False
 
-        params = request.kv_transfer_params
 
         if self.mode == MoRIIOMode.WRITE:
             # MoriiO in write mode, no remote prefill
@@ -1193,8 +1191,6 @@ class MoRIIOConnectorScheduler:
                 or request.status != RequestStatus.FINISHED_LENGTH_CAPPED):
             return False, None
 
-        # Get computed blocks.
-        all_full = request.num_computed_tokens % self.block_size == 0
         # computed_block_ids = block_ids if all_full else block_ids[:-1]
         computed_block_ids = block_ids
         # If prompt < block_size, no xfer so free blocks immediately.
@@ -1717,7 +1713,6 @@ class MoRIIOConnectorWorker:
 
         all_done_future = self._handshake_initiation_executor.submit(wait_all_dp)
         all_done_future.add_done_callback(request_ready)
-        fut = all_done_future
 
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
@@ -1774,8 +1769,7 @@ class MoRIIOConnectorWorker:
         # (roughly 8KB vs 5KB).
         # Conversely for FlashInfer, K and V are transferred in the same tensor
         # to better exploit the memory layout (ie num_blocks is the first dim).
-        kv_cache_key_list = kv_caches.keys()
-        kv_cache_shape_list = [c.shape for c in kv_caches.values()]
+        
         for cache_or_caches in kv_caches.values():
 
             cache_list = [
