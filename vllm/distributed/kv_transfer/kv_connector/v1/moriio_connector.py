@@ -168,9 +168,6 @@ class TransferError(MoRIIOError):
     """Exception raised when transfer fails."""
     pass
 
-class ConfigurationError(MoRIIOError):
-    """Exception raised for configuration errors."""
-    pass
 
 def get_moriio_mode() -> MoRIIOMode:
     read_mode = os.environ.get('MORIIO_CONNECTOR_READ_MODE', 'false').lower()
@@ -205,7 +202,7 @@ class MoRIIOConfig:
         
         
         # Port Configuration:
-        # local_ping_port   -> Outgoing heartbeat to proxy
+        # local_ping_port   -> Outgoing heartbeat to proxy(only rank0 need it)
         # proxy_ping_port   -> Remote proxy's heartbeat ingress port
         # http_port         -> Instance's HTTP service endpoint
         # local_kv_port     -> KV service port for Mori engine
@@ -227,7 +224,7 @@ class MoRIIOConfig:
             local_kv_port=base_kv_port + port_offset,
             proxy_ip=extra_config["proxy_ip"],
             proxy_port=int(extra_config["proxy_port"]),
-            local_ping_port=base_ping_port + port_offset,
+            local_ping_port=base_ping_port+port_offset,
             proxy_ping_port=int(extra_config["proxy_ping_port"]),
             http_port=int(extra_config['http_port']),
             handshake_port=int(extra_config['handshake_port']),
@@ -509,15 +506,16 @@ class MoRIIOWriter:
                 self.worker.tp_rank
             )
             # TODO: inkcherry
-            # Consider using RDMA immediate data to eliminate the need for this notification.
-            # Consider including the first word in the notificatio
+            # Consider using RDMA immediate data in decode side to eliminate the need for this notification.
+            # Consider including the first gen token from prefill in the notification
+            
             # Send completion notification
             self.worker.moriio_wrapper.send_notify(
                 task.request_id,
                 task.remote_ip,
                 remote_port
             )
-            
+            del self.worker.moriio_wrapper.done_remote_allocate_req_dict[task.request_id]
             logger.debug(
                 "Completed transfer for request %s, notified port %d",
                 task.request_id, remote_port
@@ -525,11 +523,10 @@ class MoRIIOWriter:
 class MoRIIOWrapper:
     """Wrapper for MoRIIO engine operations.
     
-    Manages MoRIIO engine lifecycle, tensor registration, and data transfer operations.
     Handles both producer and consumer roles for KV cache transfers.
     
     Args:
-        moriio_engine: Optional MoRIIO engine instance
+        moriio_engine:  MoRIIO engine instance
         tp_rank: Tensor parallel rank
         dp_rank: Data parallel rank
     """
@@ -547,7 +544,6 @@ class MoRIIOWrapper:
         self.notify_sock = None
         self.lock = threading.Lock()
         self.done_req_ids = []
-        self.done_remote_allocate_req = []
         self.done_remote_allocate_req_dict: dict[str, RemoteAllocInfo] = {}
         self.done_write_cache_req_ids = []
         self.notify_thread = None
@@ -718,7 +714,6 @@ class MoRIIOWrapper:
         msg_type = data.get("type", "unknown")
 
         with self.lock:
-            self.done_remote_allocate_req.append(req_id)
             self.done_remote_allocate_req_dict[req_id] = RemoteAllocInfo(block_ids=block_notify_list,decode_dp_rank=decode_dp_rank)
 
     def _handle_completion_message(self, msg: str):
@@ -759,23 +754,19 @@ class MoRIIOWrapper:
             raise
 
     def pop_finished_req_ids(self):
+        # producer invocation: get the set of completed requests at the decode
         with self.lock:
             done_send = set(self.done_req_ids)
             self.done_req_ids = []
         return done_send
 
     def pop_finished_write_req_ids(self):
+        # Call the consumer in write mode to get the collection after write completion
         with self.lock:
             done_write_cache = set(self.done_write_cache_req_ids)
             self.done_write_cache_req_ids = []
         return done_write_cache
 
-    def pop_remote_allocate_req_dict(self):
-        with self.lock:
-            done_remote_allocate = set(self.done_remote_allocate_req)
-            self.done_remote_allocate_req = []
-            self.done_remote_allocate_req_dict = {}
-        return done_remote_allocate
 
 
 class MoRIIOAgentMetadata(
@@ -955,19 +946,14 @@ class MoRIIOConnectorScheduler:
         self.mode=get_moriio_mode()
 
         
-        #fixme: inkcherry
-        self.side_channel_port = (
-            self.vllm_config.kv_transfer_config.kv_connector_extra_config[
-                'handshake_port'],  # envs.VLLM_NIXL_SIDE_CHANNEL_PORT +
-            (self.vllm_config.parallel_config.data_parallel_rank+1) *
-            self.vllm_config.parallel_config.tensor_parallel_size)
-        
+      
+        self.handeshake_port=self.vllm_config.kv_transfer_config.kv_connector_extra_config['handshake_port']
         logger.info(
-            f"==========> Initializing MoRIIO Scheduler {engine_id = },{self.side_channel_port = }"
+            f"==========> Initializing MoRIIO Scheduler {engine_id = }"
         )
 
         self.side_notify_port = self.vllm_config.kv_transfer_config.kv_connector_extra_config[
-            'notify_port']  # envs.VLLM_NIXL_SIDE_CHANNEL_PORT +
+            'notify_port']  
         self.tp_size = self.vllm_config.parallel_config.tensor_parallel_size
         self.dp_rank = self.vllm_config.parallel_config.data_parallel_rank
         self.is_producer = vllm_config.kv_transfer_config.kv_role == "kv_producer"
@@ -1224,14 +1210,15 @@ class MoRIIOConnectorScheduler:
             # Prefill request on remote. It will be read from D upon completion
             self._reqs_need_send[request.request_id] = time.perf_counter(
             ) + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
-        #fixme:inkcherry   check side_channel_port
+            
+        # If we execute in P-D serial mode, no notification port is needed.
         return delay_free_blocks, dict(
             do_remote_prefill=True,
             do_remote_decode=False,
             remote_block_ids=computed_block_ids,
             remote_engine_id=self.engine_id,
             remote_host=self.side_channel_host,
-            remote_port=self.side_channel_port,
+            remote_port=self.handeshake_port,
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size)
 
 
@@ -1284,7 +1271,6 @@ class MoRIIOConnectorWorker:
         self.zmq_context = zmq.Context()
         self.metadata_address = f"{self.moriio_config.local_ip}:{self.moriio_config.local_ping_port}"
         self.request_address = f"{self.moriio_config.local_ip}:{self.moriio_config.http_port}"
-        self.ping_address = f"{self.moriio_config.local_ip}:{self.moriio_config.local_ping_port}"
 
         self.moriio_engine = None
         self._handle_request_thread = None
@@ -2176,7 +2162,7 @@ class MoRIIOConnectorWorker:
         if self.mode == MoRIIOMode.WRITE:
             return
         # we only test TP<->TP  in read mode
-        assert self.dp_rank>0, "only test TP<->TP  in read mode"
+        # assert self.dp_rank>0, "only test TP<->TP  in read mode"
         dst_engine_id+="_dp0"
         sessions = self._get_built_session(dst_engine_id)
         
