@@ -33,6 +33,7 @@ from vllm.platforms import _Backend
 from vllm.utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
+from weakref import ref as weakref_ref
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -234,11 +235,8 @@ class MoRIIOConfig:
             tp_rank=tp_rank,
             dp_rank=dp_rank,
             dp_size=dp_size,
-            tp_size=tp_size
+            tp_size=tp_size, 
         )
-        
-GLOBAL_MORIIO_MODE = get_moriio_mode()
-
 
 
 """Write task execution logic for MoRIIO connector."""
@@ -253,11 +251,27 @@ class MoRIIOWriter:
         Args:
             worker: Reference to the parent worker
         """
-        self.worker = worker
+        # self.worker = worker
+        self._worker_ref: "weakref_ref[MoRIIOConnectorWorker]" = weakref_ref(worker)
         self._write_task_q: Queue[WriteTask] = Queue()
         self._write_worker_started = False
         self._write_worker_lock = threading.Lock()
         self._deferred_tasks: list[WriteTask] = []
+        
+    @property
+    def worker(self) -> "MoRIIOConnectorWorker":
+        """Get the worker instance.
+        
+        Returns:
+            The parent worker instance
+            
+        Raises:
+            RuntimeError: If worker has been garbage collected
+        """
+        worker = self._worker_ref()
+        if worker is None:
+            raise RuntimeError("Parent worker has been garbage collected")
+        return worker
     
     def ensure_worker_started(self) -> None:
         """Ensure the background write worker is running."""
@@ -372,10 +386,7 @@ class MoRIIOWriter:
         
         Args:
             task: The write task to execute
-            
-        Raises:#TODO
-            TransferError: If transfer fails
-            HandshakeError: If remote engine not ready
+  
         """
         # Get remote allocation info
         request_info = self._get_remote_alloc_info(task.request_id)
@@ -570,7 +581,7 @@ class MoRIIOWrapper:
                 tensor)
             local_memory_metadata_packed = self.local_memory_metadata.pack()
         except Exception as e:
-            raise TransferError(f"Failed to register local memory: {e}") from e
+            raise MoRIIOError(f"Failed to register local memory: {e}") from e
         self.local_memory_registered = True
         return local_memory_metadata_packed
 
@@ -845,6 +856,7 @@ class MoRIIOConnector(KVConnectorBase_V1):
         self.engine_id = str(
             get_ip()) + ":" + str(vllm_config.kv_transfer_config.
                                   kv_connector_extra_config['handshake_port'])
+        self.mode = get_moriio_mode()
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler: Optional[MoRIIOConnectorScheduler] = \
                 MoRIIOConnectorScheduler(vllm_config, self.engine_id)
@@ -906,7 +918,7 @@ class MoRIIOConnector(KVConnectorBase_V1):
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
 
-        if GLOBAL_MORIIO_MODE == MoRIIOMode.WRITE:
+        if self.mode == MoRIIOMode.WRITE:
             if get_role() == ROLE.CONSUMER:
                 self.connector_worker.moriio_wrapper.async_wait_reqid()
         assert self.connector_worker is not None
@@ -940,7 +952,8 @@ class MoRIIOConnectorScheduler:
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id: EngineId = engine_id
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
-        
+        self.mode=get_moriio_mode()
+
         
         #fixme: inkcherry
         self.side_channel_port = (
@@ -1003,7 +1016,7 @@ class MoRIIOConnectorScheduler:
 
         params = request.kv_transfer_params
 
-        if GLOBAL_MORIIO_MODE == MoRIIOMode.WRITE:
+        if self.mode == MoRIIOMode.WRITE:
             # MoriiO in write mode, no remote prefill
 
             return len(request.prompt_token_ids) - num_computed_tokens, True
@@ -1049,7 +1062,7 @@ class MoRIIOConnectorScheduler:
                                                         local_block_ids)
 
         if params is not None and params.get("do_remote_prefill"):
-            if GLOBAL_MORIIO_MODE == MoRIIOMode.READ:
+            if self.mode == MoRIIOMode.READ:
                 if remote_block_ids := params.get("remote_block_ids"):
                     if all(p in params
                            for p in ("remote_engine_id", "remote_host",
@@ -1098,7 +1111,7 @@ class MoRIIOConnectorScheduler:
     ) -> KVConnectorMetadata:
         meta = MoRIIOConnectorMetadata()
 
-        if GLOBAL_MORIIO_MODE == MoRIIOMode.WRITE:
+        if self.mode == MoRIIOMode.WRITE:
             # when async_load_kv finished, will add new reqs to scheduler_output.scheduled_new_reqs
 
             if get_role()== ROLE.CONSUMER:
@@ -1233,7 +1246,8 @@ class MoRIIOConnectorWorker:
             )
         
         self.moriio_config = MoRIIOConfig.from_vllm_config(vllm_config)
-        
+        self.mode=get_moriio_mode()
+
         logger.info("Initializing MoRIIO worker %s", engine_id)
         # for debug
         logging.getLogger("aiter").disabled = True
@@ -1420,11 +1434,11 @@ class MoRIIOConnectorWorker:
       
 
         ####write worker###
-        self._write_task_q: Queue[WriteTask] = Queue()
-        self._write_worker_started = False
-        self._write_worker_lock = threading.Lock()
-        self._deferred_tasks: list[WriteTask] = []
-        ####write worker###
+        # self._write_task_q: Queue[WriteTask] = Queue()
+        # self._write_worker_started = False
+        # self._write_worker_lock = threading.Lock()
+        # self._deferred_tasks: list[WriteTask] = []
+        # ####write worker###
 
    
 
@@ -1511,7 +1525,7 @@ class MoRIIOConnectorWorker:
                         "notify_port": self.notify_port,
                         "dp_size":self.moriio_config.dp_size,
                         "tp_size":self.moriio_config.tp_size,
-                        "transfer_mode":get_moriio_mode().name,
+                        "transfer_mode":self.mode.name,
                     }
 
                     sock.send(msgpack.dumps(data))
@@ -1863,12 +1877,12 @@ class MoRIIOConnectorWorker:
 
         if self.is_producer:
             done_sending = self.moriio_wrapper.pop_finished_req_ids()
-            if GLOBAL_MORIIO_MODE == MoRIIOMode.WRITE:
+            if self.mode == MoRIIOMode.WRITE:
                 done_recving = set()
             else:
                 done_recving=self._pop_done_transfers()
         else:
-            if GLOBAL_MORIIO_MODE == MoRIIOMode.WRITE:
+            if self.mode == MoRIIOMode.WRITE:
                 self.moriio_wrapper.async_wait_reqid()
             done_sending, done_recving = set(
             ), self.moriio_wrapper.pop_finished_write_req_ids()
@@ -1905,7 +1919,7 @@ class MoRIIOConnectorWorker:
 
         if not self.is_producer:
             return
-        if GLOBAL_MORIIO_MODE == MoRIIOMode.READ:
+        if self.mode == MoRIIOMode.READ:
             return
         remote_engine_id = None
         
@@ -1945,8 +1959,6 @@ class MoRIIOConnectorWorker:
             else:
                 break
 
-            pass
-
     def start_load_kv(self, metadata: MoRIIOConnectorMetadata):
         """
         Start loading by triggering non-blocking moriio_xfer.
@@ -1956,7 +1968,7 @@ class MoRIIOConnectorWorker:
         if self.is_producer:
             self.moriio_wrapper.async_wait_reqid()
             return
-        if GLOBAL_MORIIO_MODE == MoRIIOMode.WRITE:
+        if self.mode == MoRIIOMode.WRITE:
             return
 
         wait_handshage_readd_req = False
@@ -2159,10 +2171,12 @@ class MoRIIOConnectorWorker:
                      remote_block_ids: list[int], dst_engine_id: str,
                      request_id: str,
                      remote_host: str,
-                     remote_notify_port: int):
+                     remote_notify_port: int)-> None:
 
-        if GLOBAL_MORIIO_MODE == MoRIIOMode.WRITE:
+        if self.mode == MoRIIOMode.WRITE:
             return
+        # we only test TP<->TP  in read mode
+        assert self.dp_rank>0, "only test TP<->TP  in read mode"
         dst_engine_id+="_dp0"
         sessions = self._get_built_session(dst_engine_id)
         
