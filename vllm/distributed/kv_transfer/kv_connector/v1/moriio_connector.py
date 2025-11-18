@@ -333,13 +333,8 @@ class MoRIIOWriter:
         still_deferred: list[WriteTask] = []
         for task in self._deferred_tasks:
             if self._is_remote_ready(task):
-                try:
-                    self._execute_write_task(task)
-                except Exception as e:
-                    logger.error(
-                        "Failed to execute deferred task for request %s: %s",
-                        task.request_id, e, exc_info=True
-                    )
+
+                    self._execute_write_task(task)            
             else:
                 still_deferred.append(task)
         
@@ -505,7 +500,7 @@ class MoRIIOWriter:
                 request_info.decode_dp_rank,
                 self.worker.tp_rank
             )
-            # TODO: inkcherry
+            # TODO:
             # Consider using RDMA immediate data in decode side to eliminate the need for this notification.
             # Consider including the first gen token from prefill in the notification
             
@@ -1124,8 +1119,7 @@ class MoRIIOConnectorScheduler:
                         req, existing_blocks = self._reqs_need_pending_save[req_id]
                         updated_blocks = list(existing_blocks) + ([block_ids] if isinstance(block_ids, int) else block_ids)
                         self._reqs_need_pending_save[req_id] = (req, updated_blocks)
-
-                        if len(self._reqs_need_pending_save[req_id][1])==req.num_prompt_tokens:
+                        if len(self._reqs_need_pending_save[req_id][1]*self.block_size)>=req.num_prompt_tokens:
                             
                             meta.add_new_req(
                                 request_id=req_id,
