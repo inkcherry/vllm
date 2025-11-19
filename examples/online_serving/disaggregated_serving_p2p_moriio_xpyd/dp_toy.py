@@ -237,6 +237,10 @@ async def handle_request():
         req_data_to_prefill['kv_transfer_params']['remote_dp_size']=decode_instance_endpoint['dp_size']
         req_data_to_prefill['kv_transfer_params']['remote_tp_size']=decode_instance_endpoint['tp_size']
         send_prefill_task = asyncio.create_task(send_request_to_prefill(prefill_instance_endpoint['request_address'],req_data_to_prefill,request_id,decode_instance_endpoint,dip,dport))
+        
+        
+        
+        
         # 现在decode可以获取prefill的所有信息了
         ip, port = extract_ip_port_fast(prefill_instance_endpoint['request_address'])
         req_data['max_tokens'] -= 1
@@ -256,24 +260,21 @@ async def handle_request():
         if 'data_parallel_rank' in req_data:
             req_data['kv_transfer_params']['remote_dp_rank'] = req_data['data_parallel_rank']
             del req_data['data_parallel_rank']
-        # print("send to decode req_data:",req_data)
+            
+            
         decode_request_task = asyncio.create_task(
             start_decode_request(decode_instance_endpoint['request_address'], req_data, request_id)
         )
        
 
-        # (session, decode_response), prefill_result = await asyncio.gather(decode_request_task, send_prefill_task)
         session, decode_response = await decode_request_task
         stream_generator = stream_decode_response(session, decode_response, request_id)
         response = await make_response(stream_generator)
-        # st4=time.perf_counter()
 
     
 
         request_nums += 1
-        
-        # print(f"{(st4-st3)=},{(st3-st2)=},{(st2-st1)=},{(st1p5-st1)},{(st4-st1)=},request_id={request_id}")
-        # print(f"zovlog:-----------> quit request")
+
         return response
     except Exception as e:
         print(e)

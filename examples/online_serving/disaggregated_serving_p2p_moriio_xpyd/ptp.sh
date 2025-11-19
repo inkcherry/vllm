@@ -1,4 +1,4 @@
-
+ 
 
 
 
@@ -34,6 +34,7 @@ vllm serve $MODEL_PATH        \
  --max-model-len 4096         \
  --kv-cache-dtype fp8          \
  --enforce-eager \
- --max_num_seqs 4\
+  --max_num_seqs 64\
  --no-enable-prefix-caching \
     --kv-transfer-config '{"kv_connector":"MoRIIOConnector","kv_role":"kv_producer","kv_port":"9711","kv_connector_extra_config":{"proxy_ip":"10.158.215.60","proxy_port":"30001","proxy_ping_port":"36367","local_ping_port":"61555","http_port":"20005","handshake_port":8405,"notify_port":61005}}' \
+      2>&1 | tee /mnt/m2m_nobackup/local_logs/vllm_decode_server.log 

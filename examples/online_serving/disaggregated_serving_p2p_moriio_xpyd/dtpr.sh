@@ -10,7 +10,7 @@ ulimit -c 0
 mkdir -p /mnt/m2m_nobackup/local_logs/
 
 
-# export MORIIO_CONNECTOR_READ_MODE=1
+export MORIIO_CONNECTOR_READ_MODE=1
 
 export VLLM_ENFORCE_EPLB=1 
 export VLLM_ALL2ALL_BACKEND=mori 
