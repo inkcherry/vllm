@@ -125,7 +125,6 @@ async def send_request_to_prefill(endpoint,req_data,request_id,p_endpoint,pip,pp
             else:
                 raise RuntimeError("send_request_to_prefill response.status != 200,response.statuus = ",response.status)
 async def start_decode_request(endpoint, req_data, request_id):
-    """立即启动请求，返回响应对象"""
     session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=6 * 6000 * 6000))
     headers = {
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
@@ -135,7 +134,6 @@ async def start_decode_request(endpoint, req_data, request_id):
     return session, response
 
 async def stream_decode_response(session, response, request_id):
-    """流式处理响应"""
     try:
         if response.status == 200:
             async for chunk_bytes in response.content.iter_chunked(1024):
@@ -145,9 +143,7 @@ async def stream_decode_response(session, response, request_id):
             raise RuntimeError(f"decode response.status != 200, status = {response.status}")
     finally:
         await session.close()
-# to debug
 async def send_request_to_decode(endpoint,req_data,request_id):
-    # print(f"zovlog ========================== send response to decode {request_id}")
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=6 * 6000 * 6000)) as session:
         headers = {
             "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
@@ -160,16 +156,16 @@ async def send_request_to_decode(endpoint,req_data,request_id):
                         yield chunk_bytes
             else:
                 raise RuntimeError("send_request_to_decode response.status != 200,response.statuus = ",response.status)
+def example_round_robin_dp_loader(request_number, dp_size):
+    return request_nums % dp_size
 
-#user->proxy->prefill->proxy ->decode
 @app.route("/v1/completions", methods=["POST"])
 @app.route("/v1/chat/completions", methods=["POST"])
 async def handle_request():
-    # print(f"zovlog:-----------> enter request")
     try:
-        import time
         
         global request_nums
+        request_nums += 1
         def extract_ip_port_fast(url):
             return IP_PORT_PATTERN.search(url).groups()
         req_data = await request.get_json()
@@ -178,15 +174,6 @@ async def handle_request():
         prefill_instance_endpoint=None
         decode_instance_endpoint=None
        
-        
-     
-        # if len(prefill_instances)==2 and len(decode_instances)==2:
-        #     index_list=[[0,0],[1,0],[0,1],[1,1]]
-        #     index=index_list[request_nums % len(index_list)]
-        #     prefill_instance_endpoint = prefill_instances[index[0]]
-        #     decode_instance_endpoint = decode_instances[index[1]]
-        
-        # else:
         pid=request_nums % len(prefill_instances)
         did=request_nums % len(decode_instances)
         prefill_instance_endpoint = prefill_instances[pid]
@@ -195,24 +182,21 @@ async def handle_request():
         
         should_select_prefill_dp=False
         if prefill_instance_endpoint['dp_size']>1:
-            #dp ok
             should_select_prefill_dp=True
-            dp_rank=request_nums % 8
+            dp_rank=example_round_robin_dp_loader(request_nums,prefill_instance_endpoint['dp_size'])
             req_data['data_parallel_rank'] = dp_rank
         
         dip,dport= extract_ip_port_fast(decode_instance_endpoint['request_address'])
         ip, port = extract_ip_port_fast(prefill_instance_endpoint['request_address'])
-
-    
-
-
        
         req_data_to_prefill = copy.deepcopy(req_data)
         req_data_to_prefill['kv_transfer_params']={}
+        req_data['kv_transfer_params']={}
         req_data_to_prefill['kv_transfer_params']['remote_dp_size']=decode_instance_endpoint['dp_size']
         req_data_to_prefill['kv_transfer_params']['remote_tp_size']=decode_instance_endpoint['tp_size']
         send_prefill_task = asyncio.create_task(send_request_to_prefill(prefill_instance_endpoint['request_address'],req_data_to_prefill,request_id,decode_instance_endpoint,dip,dport))
         ip, port = extract_ip_port_fast(prefill_instance_endpoint['request_address'])
+        
         
         req_data['max_tokens'] -= 1
         if should_select_prefill_dp:
@@ -222,11 +206,17 @@ async def handle_request():
             "do_remote_prefill": True,
             "remote_handshake_port": prefill_instance_endpoint['handshake_port'],
             "remote_notify_port":prefill_instance_endpoint['notify_port'],
-            "remote_engine_id": None,
-            "remote_block_ids": None,
+            "remote_engine_id":None,
+            "remote_block_ids":None,
             "remote_host":ip ,
             "remote_port": port,
         }
+        if TRANSFER_TYPE =="READ":
+            #In read mode, prefill and decode are executed serially.
+            prefill_response=await send_prefill_task
+            req_data['kv_transfer_params']['remote_engine_id']=prefill_response['kv_transfer_params']['remote_engine_id']
+            req_data['kv_transfer_params']['remote_block_ids']=prefill_response['kv_transfer_params']['remote_block_ids']
+ 
         req_data['kv_transfer_params']['remote_dp_size'] = prefill_instance_endpoint['dp_size']
         req_data['kv_transfer_params']['remote_tp_size'] = prefill_instance_endpoint['tp_size']
         
@@ -241,18 +231,10 @@ async def handle_request():
         session, decode_response = await decode_request_task
         stream_generator = stream_decode_response(session, decode_response, request_id)
         response = await make_response(stream_generator)
-
-    
-
-        request_nums += 1
-
         return response
     except Exception as e:
         print(e)
         pass
-
-
-
 
 if __name__ == '__main__':
     t = start_service_discovery("0.0.0.0", 36367)

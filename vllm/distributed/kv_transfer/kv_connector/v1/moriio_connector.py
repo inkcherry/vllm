@@ -1863,13 +1863,6 @@ class MoRIIOConnectorWorker:
 
         return done_sending, done_recving
 
-    def _get_new_notifs(self) -> set[str]:
-        """
-        Get req_ids which got a remote xfer message. When multiple consumers
-        are reading from the same producer (heterogeneous TP scenario), wait
-        for all consumers to be done pulling.
-        """
-        pass
 
     def _pop_done_transfers(self) -> set[str]:
 
@@ -2015,9 +2008,6 @@ class MoRIIOConnectorWorker:
         if layer_name == list(self.kv_caches.keys())[0]:
             return True
         return False
-
-    def this_layer_write_meta_offset(self):
-        return self.merged_local, self.merged_remote, self.merged_sizes
 
     def merge_contiguous_blocks(
             self,
