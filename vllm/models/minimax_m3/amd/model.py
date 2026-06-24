@@ -257,10 +257,10 @@ def _m3_fused_shared_experts_enabled() -> bool:
     Mirrors ATOM.
 
     Force-enables aiter's shared-expert fusion (which gates
-    ``num_fused_shared_experts`` in the MoE layer) and pins bf16 MoE activations
-    -- gfx950 lacks the fp4 prefill FlyDSL kernels the tuned config references,
-    so the fp4 activation path would crash. Both are ``setdefault`` so an
-    explicit user override still wins.
+    ``num_fused_shared_experts`` in the MoE layer) and selects the MXFP4 SwiGLU
+    MoE activation-dtype threshold so large prefill batches use the fast fp4 asm
+    kernels while small decode batches keep bf16 activations. Both are
+    ``setdefault`` so an explicit user override still wins.
     """
     from vllm.platforms import current_platform
 
@@ -275,7 +275,11 @@ def _m3_fused_shared_experts_enabled() -> bool:
         return False
 
     os.environ.setdefault("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "1")
-    os.environ.setdefault("GPTOSS_SWIGLU_MXFP4_BF16_BOUND", "100000000")
+    # aiter knob (named after gpt-oss, where it was introduced; not gpt-oss
+    # specific) gating MoE activation dtype by token count: M < BOUND -> bf16,
+    # else fp4. M3 uses the same aiter SwiGLU MXFP4 MoE; default 256 lets prefill
+    # use the fast fp4 asm kernels while small decode batches stay bf16.
+    os.environ.setdefault("GPTOSS_SWIGLU_MXFP4_BF16_BOUND", "256")
     rocm_aiter_ops.refresh_env_variables()
     return rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
 
