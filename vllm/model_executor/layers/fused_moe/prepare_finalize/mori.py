@@ -7,7 +7,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
-from vllm.platforms import current_platform
+from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 
 logger = init_logger(__name__)
 
@@ -74,17 +74,16 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             "mori does not support apply_router_weight_on_input=True now."
         )
         scale = None
-        # When defer_input_quant is True, the expert kernel handles
-        # quantization internally, so skip FP8 dispatch quantization.
         if self.use_fp8_dispatch and not defer_input_quant:
-            from aiter import QuantType, get_hip_quant
-
-            if quant_config.is_block_quantized:
-                quant_func = get_hip_quant(QuantType.per_1x128)
-                a1, scale = quant_func(a1, quant_dtype=current_platform.fp8_dtype())
-            elif quant_config.is_per_act_token:
-                quant_func = get_hip_quant(QuantType.per_Token)
-                a1, scale = quant_func(a1, quant_dtype=current_platform.fp8_dtype())
+            a1, scale = moe_kernel_quantize_input(
+                a1,
+                quant_config.a1_scale,
+                quant_dtype=quant_config.quant_dtype,
+                per_act_token_quant=quant_config.per_act_token_quant,
+                block_shape=quant_config.block_shape,
+                is_scale_swizzled=quant_config.is_scale_swizzled,
+                mx_alignment=quant_config.mx_alignment,
+            )
 
         (
             dispatch_a1,

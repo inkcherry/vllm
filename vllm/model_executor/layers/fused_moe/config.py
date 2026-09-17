@@ -1110,6 +1110,10 @@ class FusedMoEParallelConfig:
         )
 
     @property
+    def use_mori_epv2_kernels(self):
+        return self.use_all2all_kernels and self.all2all_backend == "mori_epv2"
+
+    @property
     def use_nixl_ep_kernels(self):
         return self.use_all2all_kernels and self.all2all_backend == "nixl_ep"
 
@@ -1373,9 +1377,9 @@ class FusedMoEConfig:
                 rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
             )
 
-        if self.use_mori_kernels:
+        if self.use_mori_kernels or self.use_mori_epv2_kernels:
             assert self.rocm_aiter_fmoe_enabled, (
-                "Mori needs to be used with aiter fused_moe for now."
+                "MORI transport currently requires AITER fused expert compute."
             )
             assert not self.aiter_fmoe_shared_expert_enabled, (
                 "Mori does not support fusion shared expert now. "
@@ -1481,6 +1485,10 @@ class FusedMoEConfig:
     @property
     def use_mori_kernels(self):
         return self.moe_parallel_config.use_mori_kernels
+
+    @property
+    def use_mori_epv2_kernels(self):
+        return self.moe_parallel_config.use_mori_epv2_kernels
 
     @property
     def use_fi_nvl_two_sided_kernels(self):
