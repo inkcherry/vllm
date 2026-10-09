@@ -23,7 +23,7 @@ from .index import prepare_chunk_indices
 from .l2norm import l2norm_fwd
 from .op import exp2, log
 from .solve_tril import solve_tril
-from .utils import FLA_CHUNK_SIZE, is_amd
+from .utils import FLA_CHUNK_SIZE, is_amd, make_tensor_ptr
 
 BT_LIST_AUTOTUNE = [32, 64, 128]
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [4, 8, 16, 32]
@@ -183,22 +183,22 @@ def layer_norm_gated_fwd_kernel(
     o_d = tl.arange(0, BD)
     m_d = o_d < D
 
-    p_x = tl.make_block_ptr(x, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    b_x = tl.load(p_x, boundary_check=(0, 1)).to(tl.float32)
+    p_x, p_x_mask = make_tensor_ptr(x, (T, D), (D, 1), (i_t * BT, 0), (BT, BD))
+    b_x = tl.load(p_x, mask=p_x_mask, other=0).to(tl.float32)
     if HAS_RESIDUAL:
-        p_res = tl.make_block_ptr(
-            residual, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0)
+        p_res, p_res_mask = make_tensor_ptr(
+            residual, (T, D), (D, 1), (i_t * BT, 0), (BT, BD)
         )
-        b_x += tl.load(p_res, boundary_check=(0, 1)).to(tl.float32)
+        b_x += tl.load(p_res, mask=p_res_mask, other=0).to(tl.float32)
     if STORE_RESIDUAL_OUT:
-        p_res_out = tl.make_block_ptr(
-            residual_out, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0)
+        p_res_out, p_res_out_mask = make_tensor_ptr(
+            residual_out, (T, D), (D, 1), (i_t * BT, 0), (BT, BD)
         )
-        tl.store(p_res_out, b_x.to(p_res_out.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_res_out, b_x.to(p_res_out.dtype.element_ty), mask=p_res_out_mask)
     if not IS_RMS_NORM:
         b_mean = tl.sum(b_x, axis=1) / D
-        p_mean = tl.make_block_ptr(mean, (T,), (1,), (i_t * BT,), (BT,), (0,))
-        tl.store(p_mean, b_mean.to(p_mean.dtype.element_ty), boundary_check=(0,))
+        p_mean, p_mean_mask = make_tensor_ptr(mean, (T,), (1,), (i_t * BT,), (BT,))
+        tl.store(p_mean, b_mean.to(p_mean.dtype.element_ty), mask=p_mean_mask)
         b_xbar = tl.where(m_d[None, :], b_x - b_mean[:, None], 0.0)
         b_var = tl.sum(b_xbar * b_xbar, axis=1) / D
     else:
@@ -206,8 +206,8 @@ def layer_norm_gated_fwd_kernel(
         b_var = tl.sum(b_xbar * b_xbar, axis=1) / D
     b_rstd = 1 / tl.sqrt(b_var + eps)
 
-    p_rstd = tl.make_block_ptr(rstd, (T,), (1,), (i_t * BT,), (BT,), (0,))
-    tl.store(p_rstd, b_rstd.to(p_rstd.dtype.element_ty), boundary_check=(0,))
+    p_rstd, p_rstd_mask = make_tensor_ptr(rstd, (T,), (1,), (i_t * BT,), (BT,))
+    tl.store(p_rstd, b_rstd.to(p_rstd.dtype.element_ty), mask=p_rstd_mask)
 
     if HAS_WEIGHT:
         b_w = tl.load(w + o_d, mask=m_d).to(tl.float32)
@@ -236,8 +236,8 @@ def layer_norm_gated_fwd_kernel(
         b_y = b_y * tl.sigmoid(b_g)
 
     # Write output
-    p_y = tl.make_block_ptr(y, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
-    tl.store(p_y, b_y.to(p_y.dtype.element_ty), boundary_check=(0, 1))
+    p_y, p_y_mask = make_tensor_ptr(y, (T, D), (D, 1), (i_t * BT, 0), (BT, BD))
+    tl.store(p_y, b_y.to(p_y.dtype.element_ty), mask=p_y_mask)
 
 
 @triton.heuristics(
@@ -1348,6 +1348,7 @@ def fused_kda_gate_chunk_cumsum(
         USE_LOWER_BOUND=lower_bound is not None,
     )
     return y
+
 
 def _chunk_kda_fwd_with_cumulative_g(
     q: torch.Tensor,

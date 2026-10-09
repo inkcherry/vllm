@@ -18,7 +18,7 @@ from typing import Any, Literal
 import torch
 
 from vllm.platforms import current_platform
-from vllm.triton_utils import triton
+from vllm.triton_utils import tl, triton
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +29,21 @@ SUPPRESS_LEVEL = int(os.getenv("GDN_RECOMPUTE_SUPPRESS_LEVEL", "0"))
 
 # Default chunk size used across FLA triton kernels (kda, chunk, chunk_o, etc.)
 FLA_CHUNK_SIZE = 64
+
+
+@triton.jit
+def make_tensor_ptr(base, shape, strides, offsets, block_shape: tl.constexpr):
+    """Return a strided 1D or 2D tile and its bounds mask."""
+    tl.static_assert(len(block_shape) == 1 or len(block_shape) == 2)
+    row = offsets[0] + tl.arange(0, block_shape[0]).to(tl.int64)
+    row_mask = (row >= 0) & (row < shape[0])
+    if len(block_shape) == 1:
+        return base + row * strides[0], row_mask
+    else:
+        col = offsets[1] + tl.arange(0, block_shape[1]).to(tl.int64)
+        col_mask = (col >= 0) & (col < shape[1])
+        ptr = base + row[:, None] * strides[0] + col[None, :] * strides[1]
+        return ptr, row_mask[:, None] & col_mask[None, :]
 
 
 def tensor_cache(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:

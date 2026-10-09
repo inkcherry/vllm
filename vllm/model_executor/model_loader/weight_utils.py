@@ -22,7 +22,9 @@ import filelock
 import huggingface_hub.constants
 import numpy as np
 import regex as re
+import safetensors
 import torch
+from packaging.version import Version
 from safetensors.torch import load, load_file, safe_open, save_file
 from tqdm.auto import tqdm
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
@@ -878,6 +880,11 @@ def safetensors_weights_iterator(
     this rank are skipped **before** reading from disk, which drastically
     reduces storage I/O for MoE models under EP.
     """
+    if safetensors_load_strategy == "pread" and Version(
+        safetensors.__version__
+    ) < Version("0.8.0"):
+        raise ValueError("The pread strategy requires safetensors >= 0.8.0")
+
     loading_desc = "Loading safetensors checkpoint shards"
     if safetensors_load_strategy == "eager":
         loading_desc += " (eager)"
@@ -992,7 +999,10 @@ def safetensors_weights_iterator(
                 )
             yield from unflattened_state_dict.items()
         else:
-            with safe_open(st_file, framework="pt") as f:
+            kwargs = (
+                {"backend": "pread"} if safetensors_load_strategy == "pread" else {}
+            )
+            with safe_open(st_file, framework="pt", **kwargs) as f:
                 for name in f.keys():  # noqa: SIM118
                     if should_skip_weight(name, local_expert_ids):
                         continue

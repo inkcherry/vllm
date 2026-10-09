@@ -19,6 +19,15 @@ from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
 )
 from vllm.models.kimi_k3.amd.ops.third_party.kda import (
+    chunk_kda as chunk_kda_amd,
+)
+from vllm.models.kimi_k3.amd.ops.third_party.kda import (
+    chunk_kda_with_fused_gate as chunk_kda_with_fused_gate_amd,
+)
+from vllm.models.kimi_k3.amd.ops.third_party.kda import (
+    fused_kda_gate as fused_kda_gate_amd,
+)
+from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     fused_recurrent_kda_packed_decode as fused_recurrent_kda_packed_decode_amd,
 )
 from vllm.models.kimi_k3.nvidia import kda as nvidia_kda
@@ -46,6 +55,7 @@ from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
     fused_recurrent_kda_packed_decode,
 )
 from vllm.platforms import current_platform
+from vllm.third_party.flash_linear_attention.ops.kda import rms_norm_gated
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.utils.flashinfer import flashinfer_fused_kda_decode
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
@@ -63,6 +73,30 @@ PACKED_DECODE_IMPLS = {
     "nvidia": fused_recurrent_kda_packed_decode,
     "amd": fused_recurrent_kda_packed_decode_amd,
 }
+
+CHUNK_IMPLS = {
+    "nvidia": (chunk_kda, chunk_kda_with_fused_gate, fused_kda_gate),
+    "amd": (chunk_kda_amd, chunk_kda_with_fused_gate_amd, fused_kda_gate_amd),
+}
+
+
+@pytest.mark.parametrize("tokens, dim", [(1, 127), (17, 128), (256, 128)])
+@pytest.mark.parametrize("with_residual", [False, True])
+@torch.inference_mode()
+def test_kda_gated_norm_strided_gate_matches_torch(tokens, dim, with_residual):
+    torch.manual_seed(321)
+    x = torch.randn(tokens, 3, dim, device=DEVICE, dtype=torch.bfloat16)
+    storage = torch.randn(tokens, 3 * dim + 7, device=DEVICE, dtype=x.dtype)
+    gate = storage[:, : 3 * dim].view(tokens, 3, dim)
+    weight = torch.randn(dim, device=DEVICE, dtype=x.dtype)
+    residual = torch.randn_like(x) if with_residual else None
+    summed = x.float() if residual is None else x.float() + residual.float()
+    expected = summed * torch.rsqrt(summed.square().mean(-1, keepdim=True) + 1e-6)
+    expected = expected * weight.float() * gate.float().sigmoid()
+    actual = rms_norm_gated(
+        x, gate, weight, None, "sigmoid", residual=residual, eps=1e-6
+    )
+    torch.testing.assert_close(actual, expected.to(x.dtype), rtol=1e-2, atol=1e-2)
 
 
 def test_kda_warmup_skips_missing_metadata(monkeypatch):
@@ -209,12 +243,14 @@ def assert_close(
         ]
     ],
 )
+@pytest.mark.parametrize("impl", CHUNK_IMPLS)
 @torch.inference_mode()
 def test_chunk_kda(
     H: int,
     D: int,
     cu_seqlens: list[int],
     dtype: torch.dtype,
+    impl: str,
 ):
     T = cu_seqlens[-1]
     torch.manual_seed(42)
@@ -253,7 +289,7 @@ def test_chunk_kda(
     ref_ht = torch.cat(ref_states, dim=0)
 
     # h0 transposed to (V, K) layout for the kernel; naive uses (K, V)
-    tri_o, tri_ht = chunk_kda(
+    tri_o, tri_ht = CHUNK_IMPLS[impl][0](
         q=q.clone(),
         k=k.clone(),
         v=v.clone(),
@@ -272,20 +308,26 @@ def test_chunk_kda(
 
 
 @pytest.mark.parametrize(
-    ("cu_seqlens", "dtype", "lower_bound"),
+    ("D", "cu_seqlens", "dtype", "lower_bound"),
     [
-        ([0, 64], torch.float16, None),
-        ([0, 15, 100, 300], torch.bfloat16, None),
-        ([0, 15, 100, 300], torch.bfloat16, -3.0),
+        (64, [0, 64], torch.float16, None),
+        (64, [0, 15, 100, 300], torch.bfloat16, None),
+        (64, [0, 15, 100, 300], torch.bfloat16, -3.0),
+        (128, [0, 1], torch.bfloat16, -5.0),
+        (128, [0, 64], torch.bfloat16, -5.0),
+        (128, [0, 65, 256], torch.bfloat16, -5.0),
     ],
 )
+@pytest.mark.parametrize("impl", CHUNK_IMPLS)
 @torch.inference_mode()
 def test_chunk_kda_fused_gate_cumsum_matches_unfused(
+    D: int,
     cu_seqlens: list[int],
     dtype: torch.dtype,
     lower_bound: float | None,
+    impl: str,
 ):
-    H, D = 8, 64
+    H = 8
     T = cu_seqlens[-1]
     N = len(cu_seqlens) - 1
     torch.manual_seed(123)
@@ -305,7 +347,7 @@ def test_chunk_kda_fused_gate_cumsum_matches_unfused(
     h0 = torch.randn(N, H, D, D, dtype=torch.float32, device=DEVICE)
     initial_state = h0.transpose(-1, -2).contiguous()
 
-    gate = fused_kda_gate(
+    gate = CHUNK_IMPLS[impl][2](
         raw_g.reshape(T, H * D),
         A_log,
         D,
@@ -319,7 +361,7 @@ def test_chunk_kda_fused_gate_cumsum_matches_unfused(
         )
         torch.testing.assert_close(gate, expected_gate)
     gate = gate.unsqueeze(0)
-    old_o, old_ht = chunk_kda(
+    old_o, old_ht = CHUNK_IMPLS[impl][0](
         q=q.clone(),
         k=k.clone(),
         v=v.clone(),
@@ -331,7 +373,7 @@ def test_chunk_kda_fused_gate_cumsum_matches_unfused(
         use_qk_l2norm_in_kernel=True,
     )
     output = torch.empty_like(v)
-    new_o, new_ht = chunk_kda_with_fused_gate(
+    new_o, new_ht = CHUNK_IMPLS[impl][1](
         q=q.clone(),
         k=k.clone(),
         v=v.clone(),
@@ -344,10 +386,11 @@ def test_chunk_kda_fused_gate_cumsum_matches_unfused(
         output_final_state=True,
         cu_seqlens=cu_seqlens_t,
         use_qk_l2norm_in_kernel=True,
-        out=output,
+        **({"out": output} if impl == "nvidia" else {}),
     )
 
-    assert new_o.data_ptr() == output.data_ptr()
+    if impl == "nvidia":
+        assert new_o.data_ptr() == output.data_ptr()
     assert_close("o", old_o, new_o, 1e-3, err_atol=1e-3)
     assert_close("ht", old_ht, new_ht, 1e-3, err_atol=1e-3)
 

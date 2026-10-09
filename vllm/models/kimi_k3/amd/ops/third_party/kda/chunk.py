@@ -18,7 +18,11 @@ from vllm.third_party.flash_linear_attention.ops.cumsum import chunk_local_cumsu
 from vllm.third_party.flash_linear_attention.ops.index import prepare_chunk_indices
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.third_party.flash_linear_attention.ops.op import exp2, log
-from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE, is_amd
+from vllm.third_party.flash_linear_attention.ops.utils import (
+    FLA_CHUNK_SIZE,
+    is_amd,
+    make_tensor_ptr,
+)
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import RCP_LN2, cdiv, next_power_of_2
 
@@ -90,86 +94,61 @@ def recompute_w_u_fwd_kernel(
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
-    p_b = tl.make_block_ptr(beta + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    b_b = tl.load(p_b, boundary_check=(0,)).to(tl.float32)
-
-    p_A = tl.make_block_ptr(
-        A + (bos * H + i_h) * BT, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0)
+    p_b, p_b_mask = make_tensor_ptr(
+        beta + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,)
     )
-    b_A = tl.load(p_A, boundary_check=(0, 1))
+    b_b = tl.load(p_b, mask=p_b_mask, other=0).to(tl.float32)
+
+    p_A, p_A_mask = make_tensor_ptr(
+        A + (bos * H + i_h) * BT, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT)
+    )
+    b_A = tl.load(p_A, mask=p_A_mask, other=0)
 
     for i_v in range(tl.cdiv(V, BV)):
-        p_v = tl.make_block_ptr(
-            v + (bos * H + i_h) * V,
-            (T, V),
-            (H * V, 1),
-            (i_t * BT, i_v * BV),
-            (BT, BV),
-            (1, 0),
+        p_v, p_v_mask = make_tensor_ptr(
+            v + (bos * H + i_h) * V, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV)
         )
-        p_u = tl.make_block_ptr(
-            u + (bos * H + i_h) * V,
-            (T, V),
-            (H * V, 1),
-            (i_t * BT, i_v * BV),
-            (BT, BV),
-            (1, 0),
+        p_u, p_u_mask = make_tensor_ptr(
+            u + (bos * H + i_h) * V, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV)
         )
-        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_v = tl.load(p_v, mask=p_v_mask, other=0)
         b_vb = (b_v * b_b[:, None]).to(b_v.dtype)
         b_u = tl.dot(b_A, b_vb, input_precision=DOT_PRECISION)
-        tl.store(p_u, b_u.to(p_u.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_u, b_u.to(p_u.dtype.element_ty), mask=p_u_mask)
 
     for i_k in range(tl.cdiv(K, BK)):
-        p_w = tl.make_block_ptr(
-            w + (bos * H + i_h) * K,
-            (T, K),
-            (H * K, 1),
-            (i_t * BT, i_k * BK),
-            (BT, BK),
-            (1, 0),
+        p_w, p_w_mask = make_tensor_ptr(
+            w + (bos * H + i_h) * K, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK)
         )
-        p_k = tl.make_block_ptr(
-            k + (bos * H + i_h) * K,
-            (T, K),
-            (H * K, 1),
-            (i_t * BT, i_k * BK),
-            (BT, BK),
-            (1, 0),
+        p_k, p_k_mask = make_tensor_ptr(
+            k + (bos * H + i_h) * K, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK)
         )
-        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_k = tl.load(p_k, mask=p_k_mask, other=0)
         b_kb = b_k * b_b[:, None]
 
-        p_gk = tl.make_block_ptr(
-            gk + (bos * H + i_h) * K,
-            (T, K),
-            (H * K, 1),
-            (i_t * BT, i_k * BK),
-            (BT, BK),
-            (1, 0),
+        p_gk, p_gk_mask = make_tensor_ptr(
+            gk + (bos * H + i_h) * K, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK)
         )
-        b_gk = tl.load(p_gk, boundary_check=(0, 1))
+        b_gk = tl.load(p_gk, mask=p_gk_mask, other=0)
         b_kb *= exp2(b_gk)
         if STORE_QG:
-            p_q = tl.make_block_ptr(
+            p_q, p_q_mask = make_tensor_ptr(
                 q + (bos * H + i_h) * K,
                 (T, K),
                 (H * K, 1),
                 (i_t * BT, i_k * BK),
                 (BT, BK),
-                (1, 0),
             )
-            p_qg = tl.make_block_ptr(
+            p_qg, p_qg_mask = make_tensor_ptr(
                 qg + (bos * H + i_h) * K,
                 (T, K),
                 (H * K, 1),
                 (i_t * BT, i_k * BK),
                 (BT, BK),
-                (1, 0),
             )
-            b_q = tl.load(p_q, boundary_check=(0, 1))
+            b_q = tl.load(p_q, mask=p_q_mask, other=0)
             b_qg = b_q * exp2(b_gk)
-            tl.store(p_qg, b_qg.to(p_qg.dtype.element_ty), boundary_check=(0, 1))
+            tl.store(p_qg, b_qg.to(p_qg.dtype.element_ty), mask=p_qg_mask)
         if STORE_KG:
             last_idx = min(i_t * BT + BT, T) - 1
 
@@ -180,18 +159,17 @@ def recompute_w_u_fwd_kernel(
             )
             b_kg = b_k * exp2(b_gn - b_gk)
 
-            p_kg = tl.make_block_ptr(
+            p_kg, p_kg_mask = make_tensor_ptr(
                 kg + (bos * H + i_h) * K,
                 (T, K),
                 (H * K, 1),
                 (i_t * BT, i_k * BK),
                 (BT, BK),
-                (1, 0),
             )
-            tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty), boundary_check=(0, 1))
+            tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty), mask=p_kg_mask)
 
         b_w = tl.dot(b_A, b_kb.to(b_k.dtype))
-        tl.store(p_w, b_w.to(p_w.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(p_w, b_w.to(p_w.dtype.element_ty), mask=p_w_mask)
 
 
 def recompute_w_u_fwd(
@@ -295,69 +273,44 @@ def chunk_gla_fwd_kernel_o(
 
     b_o = tl.zeros([BT, BV], dtype=tl.float32)
     for i_k in range(tl.cdiv(K, BK)):
-        p_q = tl.make_block_ptr(
-            q + (bos * H + i_h) * K,
-            (T, K),
-            (H * K, 1),
-            (i_t * BT, i_k * BK),
-            (BT, BK),
-            (1, 0),
+        p_q, p_q_mask = make_tensor_ptr(
+            q + (bos * H + i_h) * K, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK)
         )
-        p_g = tl.make_block_ptr(
-            g + (bos * H + i_h) * K,
-            (T, K),
-            (H * K, 1),
-            (i_t * BT, i_k * BK),
-            (BT, BK),
-            (1, 0),
+        p_g, p_g_mask = make_tensor_ptr(
+            g + (bos * H + i_h) * K, (T, K), (H * K, 1), (i_t * BT, i_k * BK), (BT, BK)
         )
-        p_h = tl.make_block_ptr(
-            h + (i_tg * H + i_h) * K * V,
-            (V, K),
-            (K, 1),
-            (i_v * BV, i_k * BK),
-            (BV, BK),
-            (1, 0),
+        p_h, p_h_mask = make_tensor_ptr(
+            h + (i_tg * H + i_h) * K * V, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK)
         )
 
         # [BT, BK]
-        b_q = tl.load(p_q, boundary_check=(0, 1))
+        b_q = tl.load(p_q, mask=p_q_mask, other=0)
         b_q = (b_q * scale).to(b_q.dtype)
         # [BT, BK]
-        b_g = tl.load(p_g, boundary_check=(0, 1))
+        b_g = tl.load(p_g, mask=p_g_mask, other=0)
         # [BT, BK]
         b_qg = (b_q * exp2(b_g)).to(b_q.dtype)
         # [BV, BK]
-        b_h = tl.load(p_h, boundary_check=(0, 1))
+        b_h = tl.load(p_h, mask=p_h_mask, other=0)
         # [BT, BV]
         if i_k >= 0:
             b_o += tl.dot(b_qg, tl.trans(b_h).to(b_qg.dtype))
-    p_v = tl.make_block_ptr(
-        v + (bos * H + i_h) * V,
-        (T, V),
-        (H * V, 1),
-        (i_t * BT, i_v * BV),
-        (BT, BV),
-        (1, 0),
+    p_v, p_v_mask = make_tensor_ptr(
+        v + (bos * H + i_h) * V, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV)
     )
-    p_o = tl.make_block_ptr(
-        o + (bos * H + i_h) * V,
-        (T, V),
-        (H * V, 1),
-        (i_t * BT, i_v * BV),
-        (BT, BV),
-        (1, 0),
+    p_o, p_o_mask = make_tensor_ptr(
+        o + (bos * H + i_h) * V, (T, V), (H * V, 1), (i_t * BT, i_v * BV), (BT, BV)
     )
-    p_A = tl.make_block_ptr(
-        A + (bos * H + i_h) * BT, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0)
+    p_A, p_A_mask = make_tensor_ptr(
+        A + (bos * H + i_h) * BT, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT)
     )
     # [BT, BV]
-    b_v = tl.load(p_v, boundary_check=(0, 1))
+    b_v = tl.load(p_v, mask=p_v_mask, other=0)
     # [BT, BT]
-    b_A = tl.load(p_A, boundary_check=(0, 1))
+    b_A = tl.load(p_A, mask=p_A_mask, other=0)
     b_A = tl.where(m_s, b_A, 0.0).to(b_v.dtype)
     b_o += tl.dot(b_A, b_v, allow_tf32=False)
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=p_o_mask)
 
 
 def chunk_gla_fwd_o_gk(
@@ -479,34 +432,19 @@ def kda_gate_chunk_cumsum_vector_kernel(
 
     i_s -= 1
 
-    p_s = tl.make_block_ptr(
-        s + (bos * H + i_h) * S,
-        (T, S),
-        (H * S, 1),
-        (i_t * BT, i_s * BS),
-        (BT, BS),
-        (1, 0),
+    p_s, p_s_mask = make_tensor_ptr(
+        s + (bos * H + i_h) * S, (T, S), (H * S, 1), (i_t * BT, i_s * BS), (BT, BS)
     )
-    p_o = tl.make_block_ptr(
-        o + (bos * H + i_h) * S,
-        (T, S),
-        (H * S, 1),
-        (i_t * BT, i_s * BS),
-        (BT, BS),
-        (1, 0),
+    p_o, p_o_mask = make_tensor_ptr(
+        o + (bos * H + i_h) * S, (T, S), (H * S, 1), (i_t * BT, i_s * BS), (BT, BS)
     )
 
-    b_s = tl.load(p_s, boundary_check=(0, 1)).to(tl.float32)
+    b_s = tl.load(p_s, mask=p_s_mask, other=0).to(tl.float32)
     if HAS_BIAS:
-        p_bias = tl.make_block_ptr(
-            g_bias + i_h * S,
-            (S,),
-            (1,),
-            (i_s * BS,),
-            (BS,),
-            (0,),
+        p_bias, p_bias_mask = make_tensor_ptr(
+            g_bias + i_h * S, (S,), (1,), (i_s * BS,), (BS,)
         )
-        b_bias = tl.load(p_bias, boundary_check=(0,)).to(tl.float32)
+        b_bias = tl.load(p_bias, mask=p_bias_mask, other=0).to(tl.float32)
         b_s += b_bias[None, :]
 
     b_a = tl.exp(tl.load(A_log + i_h).to(tl.float32))
@@ -524,7 +462,7 @@ def kda_gate_chunk_cumsum_vector_kernel(
     # Boundary loads return zero, but bias and gate activation can make padded
     # rows nonzero. Padding trails valid rows, so it only affects masked stores.
     b_o = tl.cumsum(b_gate, axis=0) * cumsum_scale
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=p_o_mask)
 
 
 def fused_kda_gate_chunk_cumsum(
@@ -862,25 +800,15 @@ def kda_gate_fwd_kernel(
     stride_row = H * D
     stride_col = 1
 
-    g_ptr = tl.make_block_ptr(
-        base=g + i_h * D,
-        shape=(T, D),
-        strides=(stride_row, stride_col),
-        offsets=(n_t, 0),
-        block_shape=(BT, BD),
-        order=(1, 0),
+    g_ptr, g_ptr_mask = make_tensor_ptr(
+        g + i_h * D, (T, D), (stride_row, stride_col), (n_t, 0), (BT, BD)
     )
 
-    y_ptr = tl.make_block_ptr(
-        base=y + i_h * D,
-        shape=(T, D),
-        strides=(stride_row, stride_col),
-        offsets=(n_t, 0),
-        block_shape=(BT, BD),
-        order=(1, 0),
+    y_ptr, y_ptr_mask = make_tensor_ptr(
+        y + i_h * D, (T, D), (stride_row, stride_col), (n_t, 0), (BT, BD)
     )
 
-    b_g = tl.load(g_ptr, boundary_check=(0, 1)).to(tl.float32)
+    b_g = tl.load(g_ptr, mask=g_ptr_mask, other=0).to(tl.float32)
 
     if HAS_BIAS:
         n_d = tl.arange(0, BD)
@@ -898,7 +826,7 @@ def kda_gate_fwd_kernel(
         sp = tl.where(use_linear, b_g, (1.0 / beta) * log(1.0 + tl.exp(g_scaled)))
         b_y = -b_a * sp
 
-    tl.store(y_ptr, b_y.to(y.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(y_ptr, b_y.to(y.dtype.element_ty), mask=y_ptr_mask)
 
 
 def fused_kda_gate(

@@ -89,7 +89,8 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self._recv_topk_ids = dispatch_ids
         logger.warning_once(
             "MORI EPv2 dispatch entered: "
-            "mori.ops.dispatch_combine_v2.EpDispatchCombineOp.dispatch"
+            "mori.ops.dispatch_combine_v2.EpDispatchCombineOp.dispatch",
+            scope="process",
         )
         expert_tokens_meta = mk.ExpertTokensMetadata(
             expert_num_tokens=dispatch_recv_token_num,
@@ -124,7 +125,8 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         )[0]
         logger.warning_once(
             "MORI EPv2 combine entered: "
-            "mori.ops.dispatch_combine_v2.EpDispatchCombineOp.combine"
+            "mori.ops.dispatch_combine_v2.EpDispatchCombineOp.combine",
+            scope="process",
         )
         output.copy_(result[: output.shape[0]])
         if not torch.cuda.is_current_stream_capturing():
